@@ -393,8 +393,14 @@ awslocal elbv2 describe-load-balancers --region ap-southeast-2 --query "LoadBala
 # RDS Database
 awslocal rds describe-db-instances --region ap-southeast-2 --query "DBInstances[*].{Identifier:DBInstanceIdentifier,Engine:Engine,Status:DBInstanceStatus,Endpoint:Endpoint.Address,Port:Endpoint.Port}" --output table
 
-# Secrets Manager
+# List all secrets in Secrets Manager (Database and App Secrets)
 awslocal secretsmanager list-secrets --region ap-southeast-2 --query "SecretList[*].{Name:Name,ARN:ARN}" --output table
+
+# Inspect Database Credentials
+awslocal secretsmanager get-secret-value --secret-id tru-demo-dev-db-credentials --region ap-southeast-2 --query "SecretString" --output text
+
+# Inspect Application Configuration & Secrets
+awslocal secretsmanager get-secret-value --secret-id tru-demo-dev-app-secrets --region ap-southeast-2 --query "SecretString" --output text
 ```
 
 ### 5.4 Inspect ECS & CloudWatch Alarms

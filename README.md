@@ -149,6 +149,18 @@ awslocal rds describe-db-instances --region ap-southeast-2 --output table
 
 ---
 
+## 🔐 Centralized Secrets & Configuration (AWS Secrets Manager)
+
+To adhere to enterprise security and zero-trust principles:
+- **Zero Secrets in GitHub Actions:** CI/CD runners only hold the OIDC IAM role ARN for deployment execution; no business secrets, database passwords, or operational configs reside in GitHub Actions.
+- **Native ECS Fargate Secret Injection:** Secrets and environment variables are resolved directly inside the AWS VPC by the ECS Task Execution Role (`secretsmanager:GetSecretValue`) at container launch.
+- **Two Dedicated Secret Stores Per Environment:**
+  - `tru-demo-<env>-db-credentials`: Automatically generated PostgreSQL credentials (`host`, `port`, `username`, `password`, `dbname`, `database_url`).
+  - `tru-demo-<env>-app-secrets`: Application configuration & secrets (`APP_ENV`, `LOG_LEVEL`, third-party API keys).
+- **Zero-Downtime Rotation:** Updating an environment variable or rotating a secret in ASM takes effect on the next rolling deployment (`aws ecs update-service --force-new-deployment`) without rebuilding container images or editing CI workflows.
+
+---
+
 ## 📚 Documentation Index
 
 For complete step-by-step guides, live LocalStack resource IDs, CLI command cheat sheets, and cleanup procedures, refer to:
