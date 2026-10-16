@@ -1,6 +1,6 @@
-# Trustify DevOps: Enterprise AWS Infrastructure & Deployment Guide
+# DevOps Technical Assessment: AWS Infrastructure & Deployment Runbook
 
-This document provides end-to-end instructions for **installation**, **provisioning**, **verification**, **CI/CD automation**, and **cleanup** of the Trustify containerized FastAPI and PostgreSQL infrastructure on AWS, simulated locally on **LocalStack Pro** using **`tflocal`** and **`awslocal`**.
+This runbook provides end-to-end instructions for **evaluating**, **provisioning**, **testing**, **automating**, and **tearing down** the technical assessment exercise for **Trustify** on AWS (simulated locally using **LocalStack Pro** with `tflocal` and `awslocal`).
 
 ---
 

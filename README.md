@@ -1,4 +1,4 @@
-# Trustify: Enterprise Cloud-Native Platform
+# DevOps Technical Assessment: AWS Infrastructure & CI/CD Pipelines
 
 [![Terraform](https://img.shields.io/badge/IaC-Terraform_1.9-844FBA?logo=terraform&logoColor=white)](https://www.terraform.io/)
 [![AWS](https://img.shields.io/badge/Cloud-AWS_ap--southeast--2-FF9900?logo=amazon-aws&logoColor=white)](https://aws.amazon.com/)
@@ -7,13 +7,13 @@
 [![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL_16.1-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub_Actions-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
 
-**Trustify** is an enterprise-grade cloud platform featuring a containerized FastAPI application with PostgreSQL persistence, orchestrated via modular Terraform Infrastructure as Code (IaC), tested locally on **LocalStack Pro**, and delivered through automated **GitHub Actions GitOps pipelines**.
+This repository contains the completed **DevOps Technical Assessment** exercise submission for **Trustify**. It provisions a modular, production-grade 3-tier AWS architecture (VPC, ALB, ECS Fargate, RDS PostgreSQL, AWS Secrets Manager, and CloudWatch) using Terraform, tested locally on **LocalStack Pro**, and delivered through automated **GitHub Actions GitOps pipelines**.
 
 ---
 
 ## 🏛️ Architecture Overview
 
-The platform implements a classic enterprise **3-tier VPC architecture** designed for high security, strict traffic isolation, and progressive deployment:
+The architecture implements a classic enterprise **3-tier VPC layout** designed for high security, strict traffic isolation, and progressive deployment:
 
 ```
                       INTERNET
@@ -165,4 +165,4 @@ To adhere to enterprise security and zero-trust principles:
 
 For complete step-by-step guides, live LocalStack resource IDs, CLI command cheat sheets, and cleanup procedures, refer to:
 
-👉 **[Trustify Enterprise Deployment & Verification Guide](docs/DEPLOYMENT_GUIDE.md)**
+👉 **[DevOps Technical Assessment: Architecture & Deployment Runbook](docs/DEPLOYMENT_GUIDE.md)**
