@@ -73,6 +73,7 @@ module "ecs" {
   app_security_group_id = module.security_groups.app_security_group_id
   target_group_arn = module.alb.target_group_arn
   container_port = var.container_port
+  image_url = "${module.ecr.repository_url}:latest"
   task_cpu = var.task_cpu
   task_memory = var.task_memory
   desired_count = var.desired_count

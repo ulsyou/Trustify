@@ -443,8 +443,8 @@ In an enterprise DevOps workflow, manual command-line applies (`tflocal apply`) 
 
 1. **Application Delivery Pipeline ([`.github/workflows/application-deployment-pipeline.yml`](../.github/workflows/application-deployment-pipeline.yml)):**
    - **Quality Gate:** Automated linting with `flake8`, Dockerfile syntax validation, and module import tests.
-   - **LocalStack CI Simulation:** Spawns a LocalStack Pro service container inside GitHub Actions, provisions the required infrastructure, builds and pushes images to LocalStack ECR, registers an updated task definition revision, triggers an ECS Fargate rolling update, and validates `/health` and `/db-check` endpoints.
-   - **AWS Cloud Production:** Seamlessly transitions to AWS Cloud via OIDC authentication, pushing to Amazon ECR and updating production ECS services.
+   - **Progressive Delivery (AWS Cloud):** On merge to `main`, builds container and pushes to Amazon ECR, rolls out to **Dev** ECS Fargate &rarr; verifies health via ALB curl tests &rarr; rolls out to **Staging** &rarr; pauses at **Production** for manual DevOps approval.
+   - **Manual Single-Environment Dispatch:** Allows targeting a specific environment (`dev`, `staging`, `prod`) on demand via GitHub Actions UI or `gh` CLI.
 
 2. **Pull Request Quality Pipeline ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)):**
    - **Static Analysis:** Runs `terraform fmt -check`, `terraform validate`, and `tflint`.

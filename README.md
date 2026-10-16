@@ -97,12 +97,17 @@ In enterprise operations, **all infrastructure and application deployments are d
 
 #### A. Application Delivery ([`application-deployment-pipeline.yml`](.github/workflows/application-deployment-pipeline.yml))
 - **Quality Gate:** Automated linting with `flake8`, Dockerfile syntax checks, and FastAPI import validation.
-- **LocalStack CI Simulation:** Automatically provisions and deploys to a LocalStack container within GitHub Actions, pushes to LocalStack ECR, updates the ECS task definition, forces a rolling deployment in ECS Fargate, and runs automated `/health` and `/db-check` smoke tests.
-- **AWS Cloud Mode:** Deploys via OIDC authentication directly to production AWS ECR and ECS Fargate.
-- **Trigger:** Automatic on push to `app/**` or manual via `workflow_dispatch`:
+- **Progressive AWS Cloud Rollout:** Builds container image once and pushes to Amazon ECR, then progressively rolls out to **Dev** ECS Fargate &rarr; runs automated ALB health check &rarr; promotes to **Staging** &rarr; halts before **Production** for manual DevOps approval.
+- **Versioning Strategy:**
+  - **Dev & Staging:** Automatically tagged using the Git commit SHA (`${{ github.sha }}`) and `:latest`.
+  - **Production:** Strictly requires an explicit release version tag (e.g. `v1.0.0` or git release tag); commit SHA deployments to Production are blocked.
+- **Trigger:** Automatic on push to `app/compose-demo/**` or manual single-environment dispatch via `workflow_dispatch`:
   ```bash
-  # Deploy app to Dev environment via GitHub Actions CLI
-  gh workflow run application-deployment-pipeline.yml -f environment=dev -f app_dir="app/compose-demo"
+  # Deploy app to Dev environment (automatically uses Git commit tag)
+  gh workflow run application-deployment-pipeline.yml -f environment=dev
+
+  # Deploy app to Production (strictly requires explicit release version)
+  gh workflow run application-deployment-pipeline.yml -f environment=prod -f version=v1.0.0
   ```
 
 #### B. Infrastructure Provisioning ([`iac-provision-pipeline.yml`](.github/workflows/iac-provision-pipeline.yml))

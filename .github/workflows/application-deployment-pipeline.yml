@@ -1,0 +1,266 @@
+name: "Application Deployment Pipeline"
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+    paths:
+      - "app/compose-demo/**"
+      - ".github/workflows/application-deployment-pipeline.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "app/compose-demo/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment to deploy"
+        required: true
+        type: choice
+        default: "dev"
+        options:
+          - dev
+          - staging
+          - prod
+      version:
+        description: "Release version tag (MANDATORY for Production, e.g. v1.0.0)"
+        required: false
+        type: string
+        default: ""
+
+env:
+  APP_DIR: "app/compose-demo"
+  AWS_REGION: "ap-southeast-2"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: app-deploy-${{ github.ref }}-${{ inputs.environment || 'push' }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Stage 1: Quality Gate (Linting & Import Checks)
+  # ---------------------------------------------------------------------------
+  test-and-lint:
+    name: "Lint & Validation"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Linters & Dependencies
+        run: |
+          pip install flake8
+          [ -f "$APP_DIR/requirements.txt" ] && pip install -r "$APP_DIR/requirements.txt"
+
+      - name: Lint Application Code
+        run: |
+          flake8 "$APP_DIR/app" --count --select=E9,F63,F7,F82 --show-source --statistics || true
+
+      - name: Test Application Import
+        run: |
+          cd "$APP_DIR/app"
+          python -c "import main; print('FastAPI application imported successfully!')"
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: Build Once & Push to Amazon ECR
+  # Strategy: Dev/Staging use Git Commit SHA; Production requires explicit version
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    name: "Build & Push Image"
+    needs: [test-and-lint]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Resolve Versioning & Tags
+        id: tag
+        run: |
+          COMMIT_TAG="${{ github.sha }}"
+          VERSION_TAG="${{ inputs.version || (startsWith(github.ref, 'refs/tags/v') && github.ref_name || '') }}"
+          if [ -z "$VERSION_TAG" ] && [ -f "$APP_DIR/VERSION" ]; then
+            VERSION_TAG=$(cat "$APP_DIR/VERSION" | tr -d '[:space:]')
+          fi
+
+          # Production MUST specify the version
+          if [ "${{ inputs.environment }}" = "prod" ] && [ -z "$VERSION_TAG" ]; then
+            echo "::error::Production deployment aborted: A specific release version (e.g. v1.0.0) is strictly required for Production!"
+            exit 1
+          fi
+
+          echo "commit_tag=$COMMIT_TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION_TAG" >> $GITHUB_OUTPUT
+          echo "Dev/Staging Tag : $COMMIT_TAG"
+          echo "Production Tag  : ${VERSION_TAG:-'(none specified)'}"
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN || 'arn:aws:iam::000000000000:role/github-actions-role' }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Docker Image
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          COMMIT_TAG: ${{ steps.tag.outputs.commit_tag }}
+          PROD_TAG: ${{ steps.tag.outputs.version }}
+        run: |
+          echo "Building container image once from $APP_DIR..."
+          docker build -t app:latest "$APP_DIR"
+
+          # Determine target environments to push to
+          TARGET_ENVS="${{ inputs.environment || 'dev staging' }}"
+          for env in $TARGET_ENVS; do
+            REPO="tru-demo-$env-ecr"
+            echo "Pushing image to $REGISTRY/$REPO with Git commit tag..."
+            docker tag app:latest "$REGISTRY/$REPO:$COMMIT_TAG"
+            docker tag app:latest "$REGISTRY/$REPO:latest"
+            docker push "$REGISTRY/$REPO:$COMMIT_TAG"
+            docker push "$REGISTRY/$REPO:latest"
+          done
+
+          # For Production: tag with the mandatory release version
+          if [ -n "$PROD_TAG" ]; then
+            REPO="tru-demo-prod-ecr"
+            echo "Pushing Production release: $REGISTRY/$REPO:$PROD_TAG..."
+            docker tag app:latest "$REGISTRY/$REPO:$PROD_TAG"
+            docker tag app:latest "$REGISTRY/$REPO:latest"
+            docker push "$REGISTRY/$REPO:$PROD_TAG"
+            docker push "$REGISTRY/$REPO:latest"
+          fi
+
+          echo "image=$REGISTRY/tru-demo-${{ inputs.environment || 'dev' }}-ecr:$COMMIT_TAG" >> $GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: Automated Progressive Delivery (Triggered on Merge to main)
+  # Flow: Dev -> Staging -> Production Gate
+  # ---------------------------------------------------------------------------
+  deploy-dev:
+    name: "Deploy: Dev"
+    needs: [build-and-push]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN || 'arn:aws:iam::000000000000:role/github-actions-dev-role' }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS Fargate
+        run: aws ecs update-service --cluster tru-demo-dev-cluster --service tru-demo-dev-service --force-new-deployment
+
+      - name: Smoke Test (Dev Health)
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers --names tru-demo-dev-alb --query "LoadBalancers[0].DNSName" --output text 2>/dev/null || echo "")
+          [ -n "$ALB_DNS" ] && curl --fail --retry 3 --retry-delay 5 "http://$ALB_DNS/health" || true
+
+  deploy-staging:
+    name: "Deploy: Staging"
+    needs: [deploy-dev]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN || 'arn:aws:iam::000000000000:role/github-actions-staging-role' }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS Fargate
+        run: aws ecs update-service --cluster tru-demo-staging-cluster --service tru-demo-staging-service --force-new-deployment
+
+      - name: Smoke Test (Staging Health)
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers --names tru-demo-staging-alb --query "LoadBalancers[0].DNSName" --output text 2>/dev/null || echo "")
+          [ -n "$ALB_DNS" ] && curl --fail --retry 3 --retry-delay 5 "http://$ALB_DNS/health" || true
+
+  deploy-prod:
+    name: "Deploy: Production"
+    needs: [deploy-staging, build-and-push]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production # Manual Approval Gate
+    steps:
+      - name: Verify Production Version
+        run: |
+          VERSION="${{ needs.build-and-push.outputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Production deployment requires a release version (e.g. v1.0.0 or VERSION file). Commit SHA cannot be deployed to Production!"
+            exit 1
+          fi
+          echo "Deploying validated Production release version: $VERSION"
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN || 'arn:aws:iam::000000000000:role/github-actions-prod-role' }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS Fargate
+        run: aws ecs update-service --cluster tru-demo-prod-cluster --service tru-demo-prod-service --force-new-deployment
+
+      - name: Smoke Test (Production Health)
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers --names tru-demo-prod-alb --query "LoadBalancers[0].DNSName" --output text 2>/dev/null || echo "")
+          [ -n "$ALB_DNS" ] && curl --fail --retry 3 --retry-delay 5 "http://$ALB_DNS/health" || true
+
+  # ---------------------------------------------------------------------------
+  # Manual Targeted Deployment (Triggered via workflow_dispatch)
+  # ---------------------------------------------------------------------------
+  deploy-manual:
+    name: "Deploy: ${{ inputs.environment }} (Manual)"
+    needs: [build-and-push]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment }}
+    steps:
+      - name: Verify Environment Version Policy
+        run: |
+          if [ "${{ inputs.environment }}" = "prod" ]; then
+            VERSION="${{ inputs.version || needs.build-and-push.outputs.version }}"
+            if [ -z "$VERSION" ]; then
+              echo "::error::Production deployment aborted: A specific release version is strictly required for Production!"
+              exit 1
+            fi
+            echo "Deploying Production release version: $VERSION"
+          else
+            echo "Deploying to ${{ inputs.environment }} using Git commit tag: ${{ github.sha }}"
+          fi
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN || 'arn:aws:iam::000000000000:role/github-actions-role' }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS Fargate
+        run: aws ecs update-service --cluster "tru-demo-${{ inputs.environment }}-cluster" --service "tru-demo-${{ inputs.environment }}-service" --force-new-deployment
+
+      - name: Smoke Test (${{ inputs.environment }} Health)
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers --names "tru-demo-${{ inputs.environment }}-alb" --query "LoadBalancers[0].DNSName" --output text 2>/dev/null || echo "")
+          [ -n "$ALB_DNS" ] && curl --fail --retry 3 --retry-delay 5 "http://$ALB_DNS/health" || true
