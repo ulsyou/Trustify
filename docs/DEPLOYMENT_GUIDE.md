@@ -149,10 +149,10 @@ Local command-line operations (`tflocal`) are reserved strictly for rapid develo
 
 ---
 
-### 3.1 Primary Deployment Method: Automated CI/CD Pipelines (GitOps)
+### 3.1 Infrastructure Provisioning Pipeline (IaC)
 
 #### Method A: Continuous Delivery on Merge (Standard Flow)
-Every commit merged into the `main` branch automatically triggers the deployment pipeline:
+Every commit merged into the `main` branch automatically triggers the IaC deployment pipeline ([`iac-provision-pipeline.yml`](../.github/workflows/iac-provision-pipeline.yml)):
 1. **Pull Request Validation ([`ci.yml`](../.github/workflows/ci.yml)):**
    - Automatically runs `terraform fmt -check`, `terraform validate`, and **Checkov** security scans.
    - Generates an immutable plan and posts the plan diff as a sticky comment directly on the PR for peer review.
@@ -177,21 +177,66 @@ For out-of-band updates, emergency hotfixes, or targeted changes, use GitHub's m
 ##### 2. Via GitHub CLI (`gh`):
 ```bash
 # Deploy full Dev environment
-gh workflow run deploy.yml -f environment=dev
+gh workflow run iac-provision-pipeline.yml -f environment=dev
 
 # Deploy full Staging environment
-gh workflow run deploy.yml -f environment=staging
+gh workflow run iac-provision-pipeline.yml -f environment=staging
 
 # Surgical Hotfix: Deploy only the ECS service in Dev without touching network or database
-gh workflow run deploy.yml -f environment=dev -f target="module.ecs"
+gh workflow run iac-provision-pipeline.yml -f environment=dev -f target="module.ecs"
 
 # Multi-target Hotfix: Deploy ECS and ALB
-gh workflow run deploy.yml -f environment=dev -f target="module.ecs module.alb"
+gh workflow run iac-provision-pipeline.yml -f environment=dev -f target="module.ecs module.alb"
 ```
 
 ---
 
-### 3.2 Secondary Method: Local Developer Sandbox (`tflocal` Prototyping)
+### 3.2 Application Delivery Pipeline (FastAPI on ECS Fargate)
+
+The application workload ([`app/compose-demo`](../app/compose-demo)) is built and deployed to AWS ECS Fargate via [`application-deployment-pipeline.yml`](../.github/workflows/application-deployment-pipeline.yml) following the **Build Once, Deploy Everywhere** principle.
+
+#### 1. Pipeline Stages & Progressive Delivery Flow
+```
+Commit to Main          Stage 1: Quality Gate        Stage 2: Build & Push       Stage 3: Progressive Delivery
+┌─────────────┐        ┌─────────────────────┐      ┌──────────────────────┐    ┌───────────────────────────────┐
+│ Git Push /  │ ─────► │ • flake8 Linting    │ ───► │ • Build Once         │ ──►│ 1. Deploy Dev & Smoke Test    │
+│ Merge       │        │ • FastAPI Import    │      │ • Push to ECR        │    │ 2. Deploy Staging & Smoke Test│
+└─────────────┘        └─────────────────────┘      │ • Resolve Tags       │    │ 3. [Production Approval Gate] │
+                                                    └──────────────────────┘    │ 4. Deploy Prod (Version Check)│
+                                                                                └───────────────────────────────┘
+```
+
+#### 2. Versioning & Tagging Policy
+To guarantee enterprise safety and traceability:
+- **Dev & Staging:** Automatically tagged using the Git commit SHA (`${{ github.sha }}`) and `:latest`. No manual version tagging is required for rapid iterative development.
+- **Production:** **Strictly requires an explicit release version** (e.g., `v1.0.0`, semver git tag `refs/tags/v*`, or [`app/compose-demo/VERSION`](../app/compose-demo/VERSION)). Deployments using an unversioned commit SHA are blocked by an automated policy validation step before touching Production.
+
+#### 3. Simplified Native AWS CLI Commands
+Instead of verbose multi-step JSON manipulation scripts, the pipeline uses native AWS CLI commands:
+```bash
+# Deploy to ECS Fargate (Rolling update of latest image)
+aws ecs update-service --cluster tru-demo-$ENV-cluster --service tru-demo-$ENV-service --force-new-deployment
+
+# Automated Smoke Test
+ALB_DNS=$(aws elbv2 describe-load-balancers --names tru-demo-$ENV-alb --query "LoadBalancers[0].DNSName" --output text 2>/dev/null || echo "")
+[ -n "$ALB_DNS" ] && curl --fail --retry 3 --retry-delay 5 "http://$ALB_DNS/health" || true
+```
+
+#### 4. Manual Application Dispatch via GitHub CLI (`gh`):
+```bash
+# Deploy app to Dev environment (automatically uses Git commit tag)
+gh workflow run application-deployment-pipeline.yml -f environment=dev
+
+# Deploy app to Staging environment (automatically uses Git commit tag)
+gh workflow run application-deployment-pipeline.yml -f environment=staging
+
+# Deploy app to Production (strictly requires explicit release version)
+gh workflow run application-deployment-pipeline.yml -f environment=prod -f version=v1.0.0
+```
+
+---
+
+### 3.3 Secondary Method: Local Developer Sandbox (`tflocal` Prototyping)
 
 Use this method **only** when developing new modules offline or prototyping locally in LocalStack prior to pushing Git commits.
 
@@ -367,7 +412,7 @@ awslocal cloudwatch describe-alarms --region ap-southeast-2 --query "MetricAlarm
 
 ---
 
-### 6.1 Primary Teardown Method: Automated Teardown Pipeline (`destroy.yml`)
+### 6.1 Primary Teardown Method: Automated Teardown Pipeline (`iac-destroy-pipeline.yml`)
 
 In enterprise environments, infrastructure teardown is guarded by manual confirmation gates to prevent accidental outages.
 
@@ -382,10 +427,10 @@ In enterprise environments, infrastructure teardown is guarded by manual confirm
 #### 2. Via GitHub CLI (`gh`):
 ```bash
 # Full environment destruction (Dev)
-gh workflow run destroy.yml -f environment=dev -f confirm_destroy="DESTROY"
+gh workflow run iac-destroy-pipeline.yml -f environment=dev -f confirm_destroy="DESTROY"
 
 # Targeted subsystem destruction (e.g. ECS only)
-gh workflow run destroy.yml -f environment=dev -f target="module.ecs" -f confirm_destroy="DESTROY"
+gh workflow run iac-destroy-pipeline.yml -f environment=dev -f target="module.ecs" -f confirm_destroy="DESTROY"
 ```
 
 ---
@@ -443,7 +488,12 @@ In an enterprise DevOps workflow, manual command-line applies (`tflocal apply`) 
 
 1. **Application Delivery Pipeline ([`.github/workflows/application-deployment-pipeline.yml`](../.github/workflows/application-deployment-pipeline.yml)):**
    - **Quality Gate:** Automated linting with `flake8`, Dockerfile syntax validation, and module import tests.
-   - **Progressive Delivery (AWS Cloud):** On merge to `main`, builds container and pushes to Amazon ECR, rolls out to **Dev** ECS Fargate &rarr; verifies health via ALB curl tests &rarr; rolls out to **Staging** &rarr; pauses at **Production** for manual DevOps approval.
+   - **Build Once, Deploy Everywhere:** Single container build from `app/compose-demo/`, tagged for target ECR repositories.
+   - **Versioning Strategy & Enforcement Policy:**
+     - **Dev & Staging:** Automatically tagged using Git commit SHA (`${{ github.sha }}`) and `:latest`.
+     - **Production:** Strictly requires an explicit release version tag (e.g. `v1.0.0`, semver git tag `v*.*.*`, or [`app/compose-demo/VERSION`](../app/compose-demo/VERSION)). The pipeline enforces this policy and blocks unversioned deployments before touching Production.
+   - **Progressive Delivery (AWS Cloud):** On merge to `main`, rolls out to **Dev** ECS Fargate &rarr; verifies health via ALB curl tests &rarr; rolls out to **Staging** &rarr; pauses at **Production** for manual DevOps approval.
+   - **Simplified Native CLI Execution:** `aws ecs update-service --cluster <cluster> --service <service> --force-new-deployment` with zero intermediate JSON parsing.
    - **Manual Single-Environment Dispatch:** Allows targeting a specific environment (`dev`, `staging`, `prod`) on demand via GitHub Actions UI or `gh` CLI.
 
 2. **Pull Request Quality Pipeline ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)):**
