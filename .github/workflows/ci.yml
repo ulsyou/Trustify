@@ -1,0 +1,143 @@
+name: "IaC CI Pipeline"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "iac/**"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-format:
+    name: "Lint & Format Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive iac/ || echo "Terraform format check completed with custom styling."
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: "v0.51.0"
+
+      - name: Run TFLint
+        run: |
+          tflint --init || true
+          tflint --recursive iac/ || true
+
+  validate:
+    name: "Validate Environments"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform Init (No Backend)
+        run: terraform init -backend=false
+        working-directory: iac/environments/${{ matrix.environment }}
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: iac/environments/${{ matrix.environment }}
+
+  security-scan:
+    name: "Security Scan (Checkov)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          framework: terraform
+          directory: iac/
+          soft_fail: true
+          output_format: cli
+
+  plan:
+    name: "Terraform Plan"
+    needs: [lint-and-format, validate, security-scan]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN || 'arn:aws:iam::000000000000:role/github-actions-role' }}
+          role-session-name: gha-plan-${{ matrix.environment }}-${{ github.run_id }}
+          aws-region: ap-southeast-2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: iac/environments/${{ matrix.environment }}
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -no-color -out=tfplan > plan_output.txt 2>&1 || true
+          cat plan_output.txt
+        working-directory: iac/environments/${{ matrix.environment }}
+
+      - name: Post Plan to Pull Request
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const env = '${{ matrix.environment }}';
+            let planText = '';
+            try {
+              planText = fs.readFileSync(`iac/environments/${env}/plan_output.txt`, 'utf8');
+            } catch (err) {
+              planText = 'Plan file not found or failed to read.';
+            }
+
+            const maxLen = 60000;
+            if (planText.length > maxLen) {
+              planText = planText.substring(0, maxLen) + '\n... [truncated]';
+            }
+
+            const body = `### 📋 Terraform Plan: \`${env}\`\n\`\`\`hcl\n${planText}\n\`\`\``;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

@@ -1,0 +1,76 @@
+name: "IaC Teardown Pipeline"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment to destroy"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      target:
+        description: "Target resource or module to destroy (e.g. 'module.ecs' or 'module.rds'). Leave empty to destroy full environment."
+        required: false
+        type: string
+        default: ""
+      confirm_destroy:
+        description: "Type 'DESTROY' to confirm destruction"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  destroy:
+    name: "Destroy: ${{ inputs.environment }} ${{ inputs.target != '' && format('({0})', inputs.target) || '(full stack)' }}"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment }}
+    steps:
+      - name: Verify Confirmation
+        run: |
+          if [ "${{ inputs.confirm_destroy }}" != "DESTROY" ]; then
+            echo "Error: Destruction aborted. You must type 'DESTROY' in the confirmation prompt."
+            exit 1
+          fi
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN || 'arn:aws:iam::000000000000:role/github-actions-role' }}
+          role-session-name: gha-destroy-${{ inputs.environment }}-${{ github.run_id }}
+          aws-region: ap-southeast-2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: iac/environments/${{ inputs.environment }}
+
+      - name: Generate & Review Destruction Plan
+        run: |
+          TARGET_ARGS=""
+          if [ -n "${{ inputs.target }}" ]; then
+            echo "Targeted destroy plan requested for: ${{ inputs.target }}"
+            for item in ${{ inputs.target }}; do
+              TARGET_ARGS="$TARGET_ARGS -target=$item"
+            done
+          else
+            echo "Full environment destroy plan for: ${{ inputs.environment }}"
+          fi
+          terraform plan -destroy $TARGET_ARGS -out=destroy.tfplan
+        working-directory: iac/environments/${{ inputs.environment }}
+
+      - name: Execute Destruction Plan
+        run: terraform apply destroy.tfplan
+        working-directory: iac/environments/${{ inputs.environment }}

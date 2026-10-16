@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fast-api
+  namespace: k8s-event-api
+  labels:
+    app: fast-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: fast-api
+  template:
+    metadata:
+      labels:
+        app: fast-api
+    spec:
+      containers:
+        - name: fast-api
+          image: fastapi-event-api:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              memory: "300Mi"
+              cpu: "200m"
+            limits:
+              memory: "400Mi"
+              cpu: "500m"
+          envFrom:
+            - configMapRef:
+                name: event-api-configmap
+            - secretRef:
+                name: event-api-secret
