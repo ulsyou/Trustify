@@ -441,25 +441,30 @@ In an enterprise DevOps workflow, manual command-line applies (`tflocal apply`) 
 
 ### 7.2 GitHub Actions Workflows
 
-1. **Pull Request Pipeline (`.github/workflows/ci.yml`):**
+1. **Application Delivery Pipeline ([`.github/workflows/application-deployment-pipeline.yml`](../.github/workflows/application-deployment-pipeline.yml)):**
+   - **Quality Gate:** Automated linting with `flake8`, Dockerfile syntax validation, and module import tests.
+   - **LocalStack CI Simulation:** Spawns a LocalStack Pro service container inside GitHub Actions, provisions the required infrastructure, builds and pushes images to LocalStack ECR, registers an updated task definition revision, triggers an ECS Fargate rolling update, and validates `/health` and `/db-check` endpoints.
+   - **AWS Cloud Production:** Seamlessly transitions to AWS Cloud via OIDC authentication, pushing to Amazon ECR and updating production ECS services.
+
+2. **Pull Request Quality Pipeline ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)):**
    - **Static Analysis:** Runs `terraform fmt -check`, `terraform validate`, and `tflint`.
    - **Security Scanning:** Runs `checkov` to detect misconfigurations and security flaws before merge.
    - **Plan Generation:** Executes `terraform plan` for the changed environment and posts the exact execution diff as a sticky markdown comment on the PR for team review.
 
-2. **Delivery Pipeline (`.github/workflows/deploy.yml`):**
+3. **Infrastructure Delivery Pipeline ([`.github/workflows/iac-provision-pipeline.yml`](../.github/workflows/iac-provision-pipeline.yml)):**
    - **Automated Progressive Delivery:** On merge to `main`, automatically plans and deploys `dev`, runs automated health smoke tests, then progresses to `staging`, and holds before `prod` for manual approval.
    - **Manual Targeted Dispatch:** Allows team members to dispatch manual runs on specific environments.
 
-3. **Teardown Pipeline (`.github/workflows/destroy.yml`):**
+4. **Infrastructure Teardown Pipeline ([`.github/workflows/iac-destroy-pipeline.yml`](../.github/workflows/iac-destroy-pipeline.yml)):**
    - **Protection Mechanism:** Enforces strict manual dispatch and requires typing `"DESTROY"` in `confirm_destroy` before running.
    - **Targeted Destruction:** Allows destroying an individual subsystem or the complete environment.
 
-4. **Dynamic Targeting Design (Zero Pipeline Maintenance):**
-   - Both `deploy.yml` and `destroy.yml` avoid hardcoding module names in `type: choice` dropdowns.
+5. **Dynamic Targeting Design (Zero Pipeline Maintenance):**
+   - Both `iac-provision-pipeline.yml` and `iac-destroy-pipeline.yml` avoid hardcoding module names in `type: choice` dropdowns.
    - Instead, they use a flexible string input (`type: string` with default `""`):
      - **Full Environment (Default):** Leaving `target` empty automatically plans and applies (or destroys) the whole environment declaratively.
      - **Break-Glass Hotfixes / Surgical Takedowns:** Engineers can input any valid Terraform resource address (e.g., `module.ecs`, `module.rds`, or multiple space-separated targets like `module.ecs module.alb`) directly into the workflow prompt.
      - **Result:** You will never need to update the CI/CD workflow YAML when new modules or resources are added to `iac/`!
 
-5. **Zero-Secret Authentication:**
+6. **Zero-Secret Authentication:**
    - Authenticates to AWS via **GitHub OIDC (OpenID Connect)**. No long-lived AWS Access Keys are stored in GitHub Secrets.
