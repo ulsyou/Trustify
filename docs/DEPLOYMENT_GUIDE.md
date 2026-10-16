@@ -346,12 +346,13 @@ All resources below were verified deployed in LocalStack (`ap-southeast-2`):
 
 ---
 
-### 4.6 Database & Secrets Management (`aws_rds`)
+### 4.6 Database & Secrets Management (`aws_rds` & AWS Secrets Manager)
 | Resource | Physical ID / Name | Connection / Details |
 | :--- | :--- | :--- |
 | **RDS Instance** | `tru-demo-dev-pg` (`db-0B8D9B15`) | PostgreSQL 16.1 (`available`) |
 | **RDS Endpoint** | `localhost.localstack.cloud:4510` | Isolated inside private subnets |
-| **Secrets Manager** | `arn:aws:secretsmanager:ap-southeast-2:000000000000:secret:tru-demo-dev-db-credentials-AyTRME` | Keys: `host`, `port`, `username`, `password`, `dbname`, `database_url` |
+| **DB Secrets (ASM)** | `tru-demo-dev-db-credentials` | Managed by RDS module; keys: `host`, `port`, `username`, `password`, `dbname`, `database_url` |
+| **App Secrets & Env (ASM)** | `tru-demo-dev-app-secrets` | Application configuration & secrets; keys: `APP_ENV`, `LOG_LEVEL`, custom API keys |
 
 ---
 
@@ -518,3 +519,8 @@ In an enterprise DevOps workflow, manual command-line applies (`tflocal apply`) 
 
 6. **Zero-Secret Authentication:**
    - Authenticates to AWS via **GitHub OIDC (OpenID Connect)**. No long-lived AWS Access Keys are stored in GitHub Secrets.
+
+7. **Centralized Secrets & Environment Management (AWS Secrets Manager):**
+   - **No Secrets in GitHub Actions:** CI/CD runners only hold the OIDC IAM role ARN for deployment execution; no business secrets, database passwords, or operational configs reside in GitHub Actions.
+   - **Native ECS Fargate Injection:** Secrets and environment variables are resolved directly inside the AWS VPC by the ECS Task Execution Role (`secretsmanager:GetSecretValue`) at container launch.
+   - **Zero-Downtime Rotation:** Updating an environment variable or rotating a secret in ASM takes effect on the next rolling deployment (`aws ecs update-service --force-new-deployment`) without rebuilding container images or editing CI workflows.

@@ -99,3 +99,13 @@ output "alerts_sns_topic_arn" {
   value = module.monitoring.sns_topic_arn
 }
 #endregion
+
+#region Application Secrets Outputs
+output "app_secret_arn" {
+  value = aws_secretsmanager_secret.app_secrets.arn
+}
+
+output "app_secret_name" {
+  value = aws_secretsmanager_secret.app_secrets.name
+}
+#endregion

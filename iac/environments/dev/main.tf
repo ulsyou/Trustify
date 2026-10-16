@@ -62,6 +62,26 @@ module "rds" {
 }
 #endregion
 
+#region Application Secrets Manager
+resource "aws_secretsmanager_secret" "app_secrets" {
+  name = "${local.name_prefix}-app-secrets"
+  recovery_window_in_days = 0
+
+  tags = {
+    Name = "${local.name_prefix}-app-secrets"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "app_secrets" {
+  secret_id = aws_secretsmanager_secret.app_secrets.id
+
+  secret_string = jsonencode({
+    APP_ENV = var.environment
+    LOG_LEVEL = "INFO"
+  })
+}
+#endregion
+
 #region ECS Module
 module "ecs" {
   source = "../../modules/aws_ecs"
@@ -83,12 +103,7 @@ module "ecs" {
   autoscaling_cpu_target = var.autoscaling_cpu_target
   log_retention_days = var.log_retention_days
   enable_container_insights = var.enable_container_insights
-  environment_variables = [
-    {
-      name = "APP_ENV"
-      value = var.environment
-    }
-  ]
+  environment_variables = []
   secrets = [
     {
       name = "DATABASE_URL"
@@ -113,6 +128,14 @@ module "ecs" {
     {
       name = "DB_PASSWORD"
       valueFrom = "${module.rds.db_secret_arn}:password::"
+    },
+    {
+      name = "APP_ENV"
+      valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:APP_ENV::"
+    },
+    {
+      name = "LOG_LEVEL"
+      valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOG_LEVEL::"
     }
   ]
 }
