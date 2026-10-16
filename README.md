@@ -60,55 +60,66 @@ The platform implements a classic enterprise **3-tier VPC architecture** designe
 .
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml               # Format checks, linting, Checkov security scan & PR plan comments
-│       ├── deploy.yml           # Automated progressive deployment + manual targeted dispatch
-│       └── destroy.yml          # Guarded teardown pipeline with 'DESTROY' confirmation gate
+│       ├── ci.yml                             # IaC format checks, validation, Checkov scan & PR plan comments
+│       ├── iac-provision-pipeline.yml         # IaC progressive provisioning + manual targeted dispatch
+│       ├── iac-destroy-pipeline.yml           # Guarded IaC teardown pipeline with 'DESTROY' confirmation gate
+│       └── application-deployment-pipeline.yml# Application build, test, ECR push & ECS rolling deployment
 ├── app/
-│   ├── compose-demo/            # Docker Compose local reference implementation
-│   └── postgres-fastapi-.../    # Application container source code & requirements
+│   ├── compose-demo/                          # FastAPI demo with PostgreSQL connection & health endpoints
+│   └── k8s-event-api/                         # Kubernetes event API reference implementation
 ├── docs/
-│   └── DEPLOYMENT_GUIDE.md      # Comprehensive LocalStack, Terraform & CI/CD deployment guide
+│   └── DEPLOYMENT_GUIDE.md                    # Comprehensive LocalStack, Terraform & CI/CD deployment guide
 ├── iac/
 │   ├── environments/
-│   │   ├── dev/                 # Dev environment stack (Single-AZ, 10.10.0.0/16)
-│   │   ├── staging/             # Staging environment stack (Single-AZ, 10.20.0.0/16)
-│   │   └── prod/                # Production environment stack (Multi-AZ, 10.30.0.0/16)
+│   │   ├── dev/                               # Dev environment stack (Single-AZ, 10.10.0.0/16)
+│   │   ├── staging/                           # Staging environment stack (Single-AZ, 10.20.0.0/16)
+│   │   └── prod/                              # Production environment stack (Multi-AZ, 10.30.0.0/16)
 │   ├── modules/
-│   │   ├── alb/                 # Application Load Balancer & Target Groups
-│   │   ├── ecr/                 # Elastic Container Registry & lifecycle policies
-│   │   ├── ecs/                 # ECS Fargate Cluster, Task Defs & Services
-│   │   ├── monitoring/          # CloudWatch Alarms & SNS Alert Topics
-│   │   ├── network/             # 3-Tier VPC, Subnets, Gateways & Route Tables
-│   │   ├── rds/                 # PostgreSQL RDS & AWS Secrets Manager integration
-│   │   └── security_groups/     # Chained least-privilege Security Groups
+│   │   ├── alb/                               # Application Load Balancer & Target Groups
+│   │   ├── ecr/                               # Elastic Container Registry & lifecycle policies
+│   │   ├── ecs/                               # ECS Fargate Cluster, Task Defs & Services
+│   │   ├── monitoring/                        # CloudWatch Alarms & SNS Alert Topics
+│   │   ├── network/                           # 3-Tier VPC, Subnets, Gateways & Route Tables
+│   │   ├── rds/                               # PostgreSQL RDS & AWS Secrets Manager integration
+│   │   └── security_groups/                   # Chained least-privilege Security Groups
 │   └── shared/
-│       └── backend/             # Remote state S3 bucket & DynamoDB lock table bootstrap
-└── README.md                    # Project landing page & index
+│       └── backend/                           # Remote state S3 bucket & DynamoDB lock table bootstrap
+└── README.md                                  # Project landing page & index
 ```
 
 ---
 
 ## 🚀 Deployment Workflows
 
-In enterprise operations, **all deployments are executed via GitOps CI/CD pipelines**; local terminal applies (`tflocal`) are reserved strictly for rapid offline prototyping.
+In enterprise operations, **all infrastructure and application deployments are driven via GitOps CI/CD pipelines**; local terminal applies (`tflocal`) are reserved strictly for rapid offline prototyping.
 
 ### 1. Primary Workflow: GitOps CI/CD Pipelines
-- **Automated Progressive Delivery ([`deploy.yml`](.github/workflows/deploy.yml)):**
-  - Merging code into `main` automatically deploys **Dev**, runs automated ALB health checks (`/health`), promotes to **Staging**, and holds at **Production** for manual DevOps approval.
-- **Pull Request Quality Gate ([`ci.yml`](.github/workflows/ci.yml)):**
-  - Automatically runs `terraform fmt -check`, `terraform validate`, and **Checkov** security scans.
-  - Generates immutable plan diffs and posts them as PR comments.
-- **Guarded Teardown ([`destroy.yml`](.github/workflows/destroy.yml)):**
-  - Enforces safety gates requiring typing `"DESTROY"` to prevent accidental data loss.
-- **Manual & Targeted Dispatch:**
-  - Deploy or destroy specific modules on demand using the GitHub Actions UI or GitHub CLI:
-    ```bash
-    # Deploy only ECS in Dev via pipeline
-    gh workflow run deploy.yml -f environment=dev -f target="module.ecs"
 
-    # Safely teardown Dev with confirmation
-    gh workflow run destroy.yml -f environment=dev -f confirm_destroy="DESTROY"
-    ```
+#### A. Application Delivery ([`application-deployment-pipeline.yml`](.github/workflows/application-deployment-pipeline.yml))
+- **Quality Gate:** Automated linting with `flake8`, Dockerfile syntax checks, and FastAPI import validation.
+- **LocalStack CI Simulation:** Automatically provisions and deploys to a LocalStack container within GitHub Actions, pushes to LocalStack ECR, updates the ECS task definition, forces a rolling deployment in ECS Fargate, and runs automated `/health` and `/db-check` smoke tests.
+- **AWS Cloud Mode:** Deploys via OIDC authentication directly to production AWS ECR and ECS Fargate.
+- **Trigger:** Automatic on push to `app/**` or manual via `workflow_dispatch`:
+  ```bash
+  # Deploy app to Dev environment via GitHub Actions CLI
+  gh workflow run application-deployment-pipeline.yml -f environment=dev -f app_dir="app/compose-demo"
+  ```
+
+#### B. Infrastructure Provisioning ([`iac-provision-pipeline.yml`](.github/workflows/iac-provision-pipeline.yml))
+- **Automated Progressive Delivery:** Merging into `main` automatically deploys **Dev**, runs ALB health checks, promotes to **Staging**, and pauses before **Production** for manual DevOps approval.
+- **Dynamic Targeting (Break-Glass):** Deploy specific modules on demand without hardcoded lists:
+  ```bash
+  gh workflow run iac-provision-pipeline.yml -f environment=dev -f target="module.ecs"
+  ```
+
+#### C. Infrastructure Quality Gate ([`ci.yml`](.github/workflows/ci.yml))
+- Automatically runs `terraform fmt -check`, `terraform validate`, and **Checkov** security scans, posting plan diffs to PRs.
+
+#### D. Guarded Teardown ([`iac-destroy-pipeline.yml`](.github/workflows/iac-destroy-pipeline.yml))
+- Requires manual confirmation by typing `"DESTROY"` to tear down individual subsystems or full stacks:
+  ```bash
+  gh workflow run iac-destroy-pipeline.yml -f environment=dev -f confirm_destroy="DESTROY"
+  ```
 
 ---
 
