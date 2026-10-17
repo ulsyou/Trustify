@@ -1,65 +1,39 @@
 # How to Use
 
-Instructions for triggering pipelines, running the project locally with LocalStack, updating secrets, and testing endpoints.
+Instructions for triggering pipelines via the GitHub Web UI, running the project locally with LocalStack, updating secrets, and testing endpoints.
 
 ---
 
-## 1. Running Pipelines (GitHub Actions)
+## 1. Running Pipelines (GitHub Actions Web UI)
 
 All continuous integration, deployment, and teardown workflows run on GitHub Actions.
 
-### Trigger via GitHub Web UI
+To run a workflow manually:
+1. Navigate to the **Actions** tab in the GitHub repository.
+2. Select the workflow from the left sidebar.
+3. Click the **Run workflow** dropdown on the right, select branch `main`, fill in any inputs, and click **Run workflow**.
 
-1. Go to the **Actions** tab in GitHub.
-2. Select a workflow from the left sidebar:
-   - **Application Deployment Pipeline**: builds Docker image, pushes to ECR, and deploys to ECS.
-   - **IaC Provision Pipeline**: plans and applies Terraform infrastructure (`dev`, `staging`, `prod`).
-   - **IaC Destroy Pipeline**: tears down infrastructure with confirmation.
-3. Click **Run workflow**, choose branch `main`, enter any inputs, and click **Run workflow**.
+### Available Workflows
 
----
+- **Application Deployment Pipeline** (`application-deployment-pipeline.yml`):
+  - Builds the Docker image, pushes to ECR, and deploys to ECS Fargate.
+  - Inputs:
+    - `environment`: `dev`, `staging`, or `prod`.
+    - `image_tag`: Image version tag (optional for dev/staging which default to commit SHA, required for prod like `v1.0.0`).
 
-### Trigger via GitHub CLI (`gh`)
+- **IaC Provision Pipeline** (`iac-provision-pipeline.yml`):
+  - Plans and applies Terraform infrastructure.
+  - Automatically runs across `dev` -> `staging` -> `prod` on push to `main`.
+  - Manual inputs:
+    - `environment`: `dev`, `staging`, or `prod`.
+    - `target`: (Optional) Specific module to apply (e.g. `module.ecs` or `module.rds`). Leave blank to apply the full stack.
 
-#### Application Deployment
-```bash
-# Deploy to Dev (uses latest commit SHA)
-gh workflow run application-deployment-pipeline.yml -f environment=dev
-
-# Deploy to Staging with a specific tag
-gh workflow run application-deployment-pipeline.yml -f environment=staging -f image_tag=v1.0.0
-
-# Deploy to Production (requires release tag)
-gh workflow run application-deployment-pipeline.yml -f environment=prod -f image_tag=v1.0.0
-```
-
-#### Infrastructure Provisioning
-```bash
-# Progressive deploy across Dev -> Staging -> Prod
-gh workflow run iac-provision-pipeline.yml -f environment=dev
-
-# Deploy a specific module only
-gh workflow run iac-provision-pipeline.yml -f environment=dev -f target="module.ecs"
-gh workflow run iac-provision-pipeline.yml -f environment=dev -f target="module.rds"
-```
-
-#### Infrastructure Teardown
-```bash
-# Destroy Dev environment (requires confirm_destroy="DESTROY")
-gh workflow run iac-destroy-pipeline.yml -f environment=dev -f confirm_destroy="DESTROY"
-
-# Destroy specific module
-gh workflow run iac-destroy-pipeline.yml -f environment=dev -f target="module.ecs" -f confirm_destroy="DESTROY"
-```
-
-#### Check Workflow Runs
-```bash
-# List recent runs
-gh run list
-
-# Watch active run
-gh run watch
-```
+- **IaC Destroy Pipeline** (`iac-destroy-pipeline.yml`):
+  - Tears down Terraform-managed infrastructure.
+  - Inputs:
+    - `environment`: `dev`, `staging`, or `prod`.
+    - `target`: (Optional) Specific module to destroy.
+    - `confirm_destroy`: Safety confirmation. Must type `DESTROY` exactly.
 
 ---
 
@@ -184,10 +158,10 @@ Expected output for `/health`:
 
 ## 5. Teardown & Cleanup
 
-### Via Pipeline
-```bash
-gh workflow run iac-destroy-pipeline.yml -f environment=dev -f confirm_destroy="DESTROY"
-```
+### Via GitHub Actions
+1. Go to **Actions** &rarr; select **IaC Destroy Pipeline**.
+2. Click **Run workflow**.
+3. Select the target `environment` and type `DESTROY` in the `confirm_destroy` input field.
 
 ### Via LocalStack
 ```bash
