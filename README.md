@@ -7,13 +7,13 @@
 [![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL_16.1-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub_Actions-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
 
-This repository contains the completed **DevOps Technical Assessment** exercise submission for **Trustify**. It provisions a modular, production-grade 3-tier AWS architecture (VPC, ALB, ECS Fargate, RDS PostgreSQL, AWS Secrets Manager, and CloudWatch) using Terraform, tested locally on **LocalStack Pro**, and delivered through automated **GitHub Actions GitOps pipelines**.
+This repository contains the technical assessment implementation for **Trustify**, demonstrating an enterprise cloud infrastructure on AWS orchestrated via modular Terraform Infrastructure as Code (IaC), zero-trust secrets management with AWS Secrets Manager, and automated GitOps CI/CD delivery pipelines.
 
 ---
 
-## 🏛️ Architecture Overview
+## Architecture Overview
 
-The architecture implements a classic enterprise **3-tier VPC layout** designed for high security, strict traffic isolation, and progressive deployment:
+The infrastructure deploys a containerized FastAPI application with a PostgreSQL database following a 3-tier VPC architecture designed for traffic isolation, high availability, and least-privilege security:
 
 ```
                       INTERNET
@@ -54,21 +54,79 @@ The architecture implements a classic enterprise **3-tier VPC layout** designed 
 
 ---
 
-## 📁 Repository Structure
+## Infrastructure as Code (IaC) Overview
+
+The Terraform codebase follows a reusable, modular pattern with separated state backends for each environment tier.
+
+### 1. Core Modules (`iac/modules/`)
+- **`network`**: 3-tier VPC spanning 2 Availability Zones (`ap-southeast-2a`, `ap-southeast-2b`), public subnets with Internet Gateway, private application subnets, private database subnets, and NAT Gateways configured per tier.
+- **`security_groups`**: Least-privilege ingress and egress chaining. ALB accepts HTTP port 80; ECS tasks only accept traffic originating from the ALB security group on port 8000; RDS only accepts PostgreSQL traffic on port 5432 from ECS tasks.
+- **`alb`**: Internet-facing Application Load Balancer with HTTP listeners, dynamic target groups, and automated `/health` probing.
+- **`ecs`**: ECS Fargate cluster, task definitions, task execution IAM roles, and service definitions with rolling deployment (`ignore_changes = [desired_count]`).
+- **`ecr`**: Private container registry with immutable image tags and automated lifecycle cleanup policies.
+- **`rds`**: PostgreSQL 16.1 database with automated AWS Secrets Manager integration for credential generation and storage.
+- **`monitoring`**: CloudWatch alarms monitoring ALB 5XX error rates, RDS CPU utilization, and SNS notification topics.
+
+### 2. Remote State Management
+State files are isolated per environment within an S3 bucket configured with server-side encryption, versioning, and DynamoDB distributed state locking (`iac/shared/backend`).
+
+---
+
+## CI/CD Pipelines Overview
+
+All infrastructure and application delivery workflows are managed through GitHub Actions:
+
+### 1. Application Deployment Pipeline ([`application-deployment-pipeline.yml`](.github/workflows/application-deployment-pipeline.yml))
+- **Quality Gates:** Automated linting with `flake8`, Dockerfile static checks, and FastAPI dependency checks.
+- **Build & Push:** Single container image build pushed to Amazon ECR.
+- **Progressive Delivery:** Sequential rollout to **Dev** &rarr; automated ALB health check &rarr; **Staging** promotion &rarr; manual approval gate &rarr; **Production**.
+- **Versioning Policy:**
+  - **Dev & Staging:** Automatically tagged with the Git commit SHA (`${{ github.sha }}`) and `:latest`.
+  - **Production:** Strictly requires an explicit semver release tag (e.g. `v1.0.0`); commit SHA deployments to Production are rejected.
+
+### 2. Infrastructure Provisioning Pipeline ([`iac-provision-pipeline.yml`](.github/workflows/iac-provision-pipeline.yml))
+- **Progressive Delivery:** Automated deployment across Dev, Staging, and Production triggered on push to `main`.
+- **Manual Dispatch & Targeted Updates:** Supports running targeted module deployments (e.g., updating only `module.ecs` or `module.rds`) for emergency fixes or rapid iteration without modifying entire environments.
+
+### 3. Infrastructure Quality Gate ([`ci.yml`](.github/workflows/ci.yml))
+- Runs on pull requests to ensure code hygiene and security compliance before merging.
+- Executes `terraform fmt -check`, `terraform validate`, static security scanning via **Checkov**, and generates speculative plan summaries on pull requests.
+
+### 4. Guarded Teardown Pipeline ([`iac-destroy-pipeline.yml`](.github/workflows/iac-destroy-pipeline.yml))
+- Controlled teardown workflow protected by an explicit confirmation requirement (`confirm_destroy = "DESTROY"`), preventing accidental resource termination.
+
+> 💡 *For step-by-step instructions on triggering pipelines via the GitHub UI and GitHub CLI (`gh`), see the [How-To-Use Guide](docs/HOW_TO_USE.md).*
+
+---
+
+## Centralized Secrets & Configuration (AWS Secrets Manager)
+
+To enforce zero-trust security and decoupled operations:
+- **Zero Secrets in CI/CD:** GitHub Actions runners do not store application environment variables, API tokens, or database passwords. Runners only use an AWS OIDC IAM role for deployment authentication.
+- **Direct ECS Fargate Injection:** Secrets and runtime variables are injected into container tasks at launch via the ECS Task Execution Role (`secretsmanager:GetSecretValue`).
+- **Dedicated Secret Stores per Tier:**
+  - `tru-demo-<env>-db-credentials`: Managed RDS PostgreSQL credentials (`host`, `port`, `username`, `password`, `dbname`, `database_url`).
+  - `tru-demo-<env>-app-secrets`: Runtime application configuration (`APP_ENV`, `LOG_LEVEL`, third-party keys).
+- **Zero-Downtime Configuration Updates:** Updating secrets in Secrets Manager applies instantly to running services via an ECS rolling deployment without modifying code or rebuilding Docker images.
+
+---
+
+## Repository Structure
 
 ```
 .
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml                             # IaC format checks, validation, Checkov scan & PR plan comments
-│       ├── iac-provision-pipeline.yml         # IaC progressive provisioning + manual targeted dispatch
-│       ├── iac-destroy-pipeline.yml           # Guarded IaC teardown pipeline with 'DESTROY' confirmation gate
-│       └── application-deployment-pipeline.yml# Application build, test, ECR push & ECS rolling deployment
+│       ├── iac-provision-pipeline.yml         # IaC progressive provisioning + targeted dispatch
+│       ├── iac-destroy-pipeline.yml           # Guarded IaC teardown pipeline with 'DESTROY' confirmation
+│       └── application-deployment-pipeline.yml# Application build, test, ECR push & ECS progressive rollout
 ├── app/
 │   ├── compose-demo/                          # FastAPI demo with PostgreSQL connection & health endpoints
 │   └── k8s-event-api/                         # Kubernetes event API reference implementation
 ├── docs/
-│   └── DEPLOYMENT_GUIDE.md                    # Comprehensive LocalStack, Terraform & CI/CD deployment guide
+│   ├── HOW_TO_USE.md                          # Practical runbook: pipeline triggers, LocalStack & secret rotation
+│   └── DEPLOYMENT_GUIDE.md                    # Deep-dive architecture runbook & LocalStack simulation verification
 ├── iac/
 │   ├── environments/
 │   │   ├── dev/                               # Dev environment stack (Single-AZ, 10.10.0.0/16)
@@ -84,85 +142,12 @@ The architecture implements a classic enterprise **3-tier VPC layout** designed 
 │   │   └── security_groups/                   # Chained least-privilege Security Groups
 │   └── shared/
 │       └── backend/                           # Remote state S3 bucket & DynamoDB lock table bootstrap
-└── README.md                                  # Project landing page & index
+└── README.md                                  # Architectural & conceptual project overview
 ```
 
 ---
 
-## 🚀 Deployment Workflows
+## Documentation Index
 
-In enterprise operations, **all infrastructure and application deployments are driven via GitOps CI/CD pipelines**; local terminal applies (`tflocal`) are reserved strictly for rapid offline prototyping.
-
-### 1. Primary Workflow: GitOps CI/CD Pipelines
-
-#### A. Application Delivery ([`application-deployment-pipeline.yml`](.github/workflows/application-deployment-pipeline.yml))
-- **Quality Gate:** Automated linting with `flake8`, Dockerfile syntax checks, and FastAPI import validation.
-- **Progressive AWS Cloud Rollout:** Builds container image once and pushes to Amazon ECR, then progressively rolls out to **Dev** ECS Fargate &rarr; runs automated ALB health check &rarr; promotes to **Staging** &rarr; halts before **Production** for manual DevOps approval.
-- **Versioning Strategy:**
-  - **Dev & Staging:** Automatically tagged using the Git commit SHA (`${{ github.sha }}`) and `:latest`.
-  - **Production:** Strictly requires an explicit release version tag (e.g. `v1.0.0` or git release tag); commit SHA deployments to Production are blocked.
-- **Trigger:** Automatic on push to `app/compose-demo/**` or manual single-environment dispatch via `workflow_dispatch`:
-  ```bash
-  # Deploy app to Dev environment (automatically uses Git commit tag)
-  gh workflow run application-deployment-pipeline.yml -f environment=dev
-
-  # Deploy app to Production (strictly requires explicit release version)
-  gh workflow run application-deployment-pipeline.yml -f environment=prod -f version=v1.0.0
-  ```
-
-#### B. Infrastructure Provisioning ([`iac-provision-pipeline.yml`](.github/workflows/iac-provision-pipeline.yml))
-- **Automated Progressive Delivery:** Merging into `main` automatically deploys **Dev**, runs ALB health checks, promotes to **Staging**, and pauses before **Production** for manual DevOps approval.
-- **Dynamic Targeting (Break-Glass):** Deploy specific modules on demand without hardcoded lists:
-  ```bash
-  gh workflow run iac-provision-pipeline.yml -f environment=dev -f target="module.ecs"
-  ```
-
-#### C. Infrastructure Quality Gate ([`ci.yml`](.github/workflows/ci.yml))
-- Automatically runs `terraform fmt -check`, `terraform validate`, and **Checkov** security scans, posting plan diffs to PRs.
-
-#### D. Guarded Teardown ([`iac-destroy-pipeline.yml`](.github/workflows/iac-destroy-pipeline.yml))
-- Requires manual confirmation by typing `"DESTROY"` to tear down individual subsystems or full stacks:
-  ```bash
-  gh workflow run iac-destroy-pipeline.yml -f environment=dev -f confirm_destroy="DESTROY"
-  ```
-
----
-
-### 2. Secondary Workflow: LocalStack Developer Sandbox
-When prototyping new modules offline before creating a Git commit:
-```powershell
-# 1. Start LocalStack
-lstk start
-
-# 2. Bootstrap Remote State
-cd iac/shared/backend
-tflocal init && tflocal apply -out=backend.tfplan
-
-# 3. Deploy Dev Stack
-cd ../../environments/dev
-tflocal init && tflocal apply -out=dev.tfplan
-
-# 4. Inspect Live Resources
-awslocal elbv2 describe-load-balancers --region ap-southeast-2 --output table
-awslocal rds describe-db-instances --region ap-southeast-2 --output table
-```
-
----
-
-## 🔐 Centralized Secrets & Configuration (AWS Secrets Manager)
-
-To adhere to enterprise security and zero-trust principles:
-- **Zero Secrets in GitHub Actions:** CI/CD runners only hold the OIDC IAM role ARN for deployment execution; no business secrets, database passwords, or operational configs reside in GitHub Actions.
-- **Native ECS Fargate Secret Injection:** Secrets and environment variables are resolved directly inside the AWS VPC by the ECS Task Execution Role (`secretsmanager:GetSecretValue`) at container launch.
-- **Two Dedicated Secret Stores Per Environment:**
-  - `tru-demo-<env>-db-credentials`: Automatically generated PostgreSQL credentials (`host`, `port`, `username`, `password`, `dbname`, `database_url`).
-  - `tru-demo-<env>-app-secrets`: Application configuration & secrets (`APP_ENV`, `LOG_LEVEL`, third-party API keys).
-- **Zero-Downtime Rotation:** Updating an environment variable or rotating a secret in ASM takes effect on the next rolling deployment (`aws ecs update-service --force-new-deployment`) without rebuilding container images or editing CI workflows.
-
----
-
-## 📚 Documentation Index
-
-For complete step-by-step guides, live LocalStack resource IDs, CLI command cheat sheets, and cleanup procedures, refer to:
-
-👉 **[DevOps Technical Assessment: Architecture & Deployment Runbook](docs/DEPLOYMENT_GUIDE.md)**
+- 📖 **[How-To-Use Guide & Operational Runbook](docs/HOW_TO_USE.md)**: Operational guide containing execution instructions for running pipelines (UI & GitHub CLI), LocalStack developer sandbox testing, secret rotation, and smoke testing.
+- 📐 **[Architecture & Deployment Runbook](docs/DEPLOYMENT_GUIDE.md)**: In-depth technical architecture, module parameter matrix, and LocalStack simulation validation logs.
