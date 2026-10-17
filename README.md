@@ -1,19 +1,17 @@
-# DevOps Technical Assessment: AWS Infrastructure & CI/CD Pipelines
+# DevOps Assessment: AWS Infrastructure & CI/CD
 
-[![Terraform](https://img.shields.io/badge/IaC-Terraform_1.9-844FBA?logo=terraform&logoColor=white)](https://www.terraform.io/)
-[![AWS](https://img.shields.io/badge/Cloud-AWS_ap--southeast--2-FF9900?logo=amazon-aws&logoColor=white)](https://aws.amazon.com/)
-[![LocalStack](https://img.shields.io/badge/Emulation-LocalStack_Pro-0052CC?logo=localstack&logoColor=white)](https://localstack.cloud/)
-[![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL_16.1-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub_Actions-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
+This repository contains an AWS infrastructure setup using Terraform and automated CI/CD pipelines with GitHub Actions for deploying a containerized FastAPI application with PostgreSQL.
 
-This repository contains the technical assessment implementation for **Trustify**, demonstrating an enterprise cloud infrastructure on AWS orchestrated via modular Terraform Infrastructure as Code (IaC), zero-trust secrets management with AWS Secrets Manager, and automated GitOps CI/CD delivery pipelines.
+The setup is tested locally using LocalStack.
 
 ---
 
 ## Architecture Overview
 
-The infrastructure deploys a containerized FastAPI application with a PostgreSQL database following a 3-tier VPC architecture designed for traffic isolation, high availability, and least-privilege security:
+The infrastructure uses a standard 3-tier VPC layout:
+- **Public Subnets**: Internet Gateway, NAT Gateway, Application Load Balancer (ALB).
+- **Private App Subnets**: ECS Fargate running the FastAPI container.
+- **Private DB Subnets**: RDS PostgreSQL (isolated from the internet).
 
 ```
                       INTERNET
@@ -24,7 +22,7 @@ The infrastructure deploys a containerized FastAPI application with a PostgreSQL
         ┌────────────────┴────────────────┐
         │       Public Subnets (x2)       │
         │   ┌─────────────────────────┐   │
-        │   │ Application Load Balancer│  │ (Port :80 HTTP Ingress)
+        │   │ Application Load Balancer│  │ (Port 80)
         │   └────────────┬────────────┘   │
         │                │                │
         │   [ NAT Gateway & Elastic IP ]  │
@@ -33,81 +31,65 @@ The infrastructure deploys a containerized FastAPI application with a PostgreSQL
         ┌────────────────┼────────────────┐
         │     Private App Subnets (x2)    │
         │   ┌────────────▼────────────┐   │
-        │   │  ECS Fargate Container  │   │ (Port :8000 FastAPI Service)
+        │   │  ECS Fargate Container  │   │ (Port 8000 FastAPI)
         │   └────────────┬────────────┘   │
         └────────────────┼────────────────┘
-                         │ (Port :5432)
+                         │ (Port 5432)
         ┌────────────────┼────────────────┐
         │      Private DB Subnets (x2)    │
         │   ┌────────────▼────────────┐   │
-        │   │  RDS PostgreSQL 16.1    │   │ (Isolated Database Tier)
+        │   │  RDS PostgreSQL 16.1    │   │ (Private)
         │   └─────────────────────────┘   │
         └─────────────────────────────────┘
 ```
 
 ### Environment Tiers
-| Environment | High Availability | NAT Gateways | RDS Deployment | Promotion Gate |
+
+| Environment | Architecture | NAT Gateways | RDS Deployment | Deployment Trigger |
 | :--- | :--- | :--- | :--- | :--- |
-| **`dev`** | Single-AZ | 1 Gateway | Single Instance (`db_multi_az = false`) | Auto on merge to `main` |
-| **`staging`** | Single-AZ | 1 Gateway | Single Instance (`db_multi_az = false`) | Auto after Dev smoke test |
-| **`prod`** | **Multi-AZ** | 2 Gateways | Multi-AZ Standby (`db_multi_az = true`) | Manual Approval Required |
+| **`dev`** | Single-AZ | 1 Gateway | Single Instance (`db_multi_az = false`) | Push to `main` |
+| **`staging`** | Single-AZ | 1 Gateway | Single Instance (`db_multi_az = false`) | Auto after Dev verification |
+| **`prod`** | Multi-AZ | 2 Gateways | Multi-AZ (`db_multi_az = true`) | Manual approval |
 
 ---
 
-## Infrastructure as Code (IaC) Overview
+## Infrastructure as Code (IaC)
 
-The Terraform codebase follows a reusable, modular pattern with separated state backends for each environment tier.
+Terraform configurations are structured as reusable modules under `iac/modules/`:
 
-### 1. Core Modules (`iac/modules/`)
-- **`network`**: 3-tier VPC spanning 2 Availability Zones (`ap-southeast-2a`, `ap-southeast-2b`), public subnets with Internet Gateway, private application subnets, private database subnets, and NAT Gateways configured per tier.
-- **`security_groups`**: Least-privilege ingress and egress chaining. ALB accepts HTTP port 80; ECS tasks only accept traffic originating from the ALB security group on port 8000; RDS only accepts PostgreSQL traffic on port 5432 from ECS tasks.
-- **`alb`**: Internet-facing Application Load Balancer with HTTP listeners, dynamic target groups, and automated `/health` probing.
-- **`ecs`**: ECS Fargate cluster, task definitions, task execution IAM roles, and service definitions with rolling deployment (`ignore_changes = [desired_count]`).
-- **`ecr`**: Private container registry with immutable image tags and automated lifecycle cleanup policies.
-- **`rds`**: PostgreSQL 16.1 database with automated AWS Secrets Manager integration for credential generation and storage.
-- **`monitoring`**: CloudWatch alarms monitoring ALB 5XX error rates, RDS CPU utilization, and SNS notification topics.
+- **`network`**: VPC, public/private subnets across 2 AZs (`ap-southeast-2a`, `ap-southeast-2b`), Internet Gateway, route tables, and NAT Gateways.
+- **`security_groups`**: Least-privilege rules chaining ALB -> ECS (port 8000) -> RDS (port 5432).
+- **`alb`**: Application Load Balancer, target group, and health check route (`/health`).
+- **`ecs`**: ECS Fargate cluster, task definition, and service with rolling deployment.
+- **`ecr`**: Container registry with image lifecycle policies.
+- **`rds`**: PostgreSQL database with credentials managed via AWS Secrets Manager.
+- **`monitoring`**: CloudWatch alarms (ALB 5xx errors, ECS memory) and SNS alert topics.
 
-### 2. Remote State Management
-State files are isolated per environment within an S3 bucket configured with server-side encryption, versioning, and DynamoDB distributed state locking (`iac/shared/backend`).
+Remote state is stored in S3 with DynamoDB locking (`iac/shared/backend/`).
 
 ---
 
-## CI/CD Pipelines Overview
+## CI/CD Pipelines
 
-All infrastructure and application delivery workflows are managed through GitHub Actions:
+Workflows are defined in `.github/workflows/`:
 
-### 1. Application Deployment Pipeline ([`application-deployment-pipeline.yml`](.github/workflows/application-deployment-pipeline.yml))
-- **Quality Gates:** Automated linting with `flake8`, Dockerfile static checks, and FastAPI dependency checks.
-- **Build & Push:** Single container image build pushed to Amazon ECR.
-- **Progressive Delivery:** Sequential rollout to **Dev** &rarr; automated ALB health check &rarr; **Staging** promotion &rarr; manual approval gate &rarr; **Production**.
-- **Versioning Policy:**
-  - **Dev & Staging:** Automatically tagged with the Git commit SHA (`${{ github.sha }}`) and `:latest`.
-  - **Production:** Strictly requires an explicit semver release tag (e.g. `v1.0.0`); commit SHA deployments to Production are rejected.
-
-### 2. Infrastructure Provisioning Pipeline ([`iac-provision-pipeline.yml`](.github/workflows/iac-provision-pipeline.yml))
-- **Progressive Delivery:** Automated deployment across Dev, Staging, and Production triggered on push to `main`.
-- **Manual Dispatch & Targeted Updates:** Supports running targeted module deployments (e.g., updating only `module.ecs` or `module.rds`) for emergency fixes or rapid iteration without modifying entire environments.
-
-### 3. Infrastructure Quality Gate ([`ci.yml`](.github/workflows/ci.yml))
-- Runs on pull requests to ensure code hygiene and security compliance before merging.
-- Executes `terraform fmt -check`, `terraform validate`, static security scanning via **Checkov**, and generates speculative plan summaries on pull requests.
-
-### 4. Guarded Teardown Pipeline ([`iac-destroy-pipeline.yml`](.github/workflows/iac-destroy-pipeline.yml))
-- Controlled teardown workflow protected by an explicit confirmation requirement (`confirm_destroy = "DESTROY"`), preventing accidental resource termination.
-
-> 💡 *For step-by-step instructions on triggering pipelines via the GitHub UI and GitHub CLI (`gh`), see the [How-To-Use Guide](docs/HOW_TO_USE.md).*
+1. **`ci.yml`**: Runs `terraform fmt`, `validate`, and Checkov security scan on pull requests.
+2. **`iac-provision-pipeline.yml`**: Deploys Terraform infrastructure progressively (`dev` -> `staging` -> `prod`). Supports targeted deployment via workflow inputs (e.g. `target: module.ecs`).
+3. **`application-deployment-pipeline.yml`**: Lints the app, builds the Docker image, pushes to ECR, and triggers ECS rolling updates.
+   - Dev & Staging: tagged with commit SHA.
+   - Production: requires a release version tag (e.g. `v1.0.0`).
+4. **`iac-destroy-pipeline.yml`**: Tears down infrastructure. Requires typing `DESTROY` as an input confirmation.
 
 ---
 
-## Centralized Secrets & Configuration (AWS Secrets Manager)
+## Secrets Management (AWS Secrets Manager)
 
-To enforce zero-trust security and decoupled operations:
-- **Zero Secrets in CI/CD:** GitHub Actions runners do not store application environment variables, API tokens, or database passwords. Runners only use an AWS OIDC IAM role for deployment authentication.
-- **Direct ECS Fargate Injection:** Secrets and runtime variables are injected into container tasks at launch via the ECS Task Execution Role (`secretsmanager:GetSecretValue`).
-- **Dedicated Secret Stores per Tier:**
-  - `tru-demo-<env>-db-credentials`: Managed RDS PostgreSQL credentials (`host`, `port`, `username`, `password`, `dbname`, `database_url`).
-  - `tru-demo-<env>-app-secrets`: Runtime application configuration (`APP_ENV`, `LOG_LEVEL`, third-party keys).
-- **Zero-Downtime Configuration Updates:** Updating secrets in Secrets Manager applies instantly to running services via an ECS rolling deployment without modifying code or rebuilding Docker images.
+Application configuration and database credentials are stored in AWS Secrets Manager (ASM) instead of GitHub Actions secrets:
+
+- **`tru-demo-<env>-db-credentials`**: Database host, port, username, password, and database URL.
+- **`tru-demo-<env>-app-secrets`**: Application environment variables (`APP_ENV`, `LOG_LEVEL`, API keys).
+
+ECS tasks load these secrets directly at container startup via the ECS Task Execution Role. Secrets can be updated in AWS Secrets Manager, and applying an ECS rolling deployment reloads the application with the new values without rebuilding images.
 
 ---
 
@@ -117,37 +99,26 @@ To enforce zero-trust security and decoupled operations:
 .
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                             # IaC format checks, validation, Checkov scan & PR plan comments
-│       ├── iac-provision-pipeline.yml         # IaC progressive provisioning + targeted dispatch
-│       ├── iac-destroy-pipeline.yml           # Guarded IaC teardown pipeline with 'DESTROY' confirmation
-│       └── application-deployment-pipeline.yml# Application build, test, ECR push & ECS progressive rollout
+│       ├── ci.yml                             # PR validation & security checks
+│       ├── iac-provision-pipeline.yml         # Terraform provision pipeline
+│       ├── iac-destroy-pipeline.yml           # Terraform destroy pipeline
+│       └── application-deployment-pipeline.yml# App build & ECS deployment
 ├── app/
-│   ├── compose-demo/                          # FastAPI demo with PostgreSQL connection & health endpoints
-│   └── k8s-event-api/                         # Kubernetes event API reference implementation
+│   ├── compose-demo/                          # FastAPI demo application
+│   └── k8s-event-api/                         # Kubernetes event API reference
 ├── docs/
-│   ├── HOW_TO_USE.md                          # Practical runbook: pipeline triggers, LocalStack & secret rotation
-│   └── DEPLOYMENT_GUIDE.md                    # Deep-dive architecture runbook & LocalStack simulation verification
+│   ├── HOW_TO_USE.md                          # Commands for running pipelines & LocalStack
+│   └── DEPLOYMENT_GUIDE.md                    # Detailed deployment & architecture notes
 ├── iac/
-│   ├── environments/
-│   │   ├── dev/                               # Dev environment stack (Single-AZ, 10.10.0.0/16)
-│   │   ├── staging/                           # Staging environment stack (Single-AZ, 10.20.0.0/16)
-│   │   └── prod/                              # Production environment stack (Multi-AZ, 10.30.0.0/16)
-│   ├── modules/
-│   │   ├── alb/                               # Application Load Balancer & Target Groups
-│   │   ├── ecr/                               # Elastic Container Registry & lifecycle policies
-│   │   ├── ecs/                               # ECS Fargate Cluster, Task Defs & Services
-│   │   ├── monitoring/                        # CloudWatch Alarms & SNS Alert Topics
-│   │   ├── network/                           # 3-Tier VPC, Subnets, Gateways & Route Tables
-│   │   ├── rds/                               # PostgreSQL RDS & AWS Secrets Manager integration
-│   │   └── security_groups/                   # Chained least-privilege Security Groups
-│   └── shared/
-│       └── backend/                           # Remote state S3 bucket & DynamoDB lock table bootstrap
-└── README.md                                  # Architectural & conceptual project overview
+│   ├── environments/                          # dev, staging, prod stacks
+│   ├── modules/                               # Terraform modules (vpc, rds, ecs, alb, etc.)
+│   └── shared/backend/                        # S3 & DynamoDB remote state backend
+└── README.md
 ```
 
 ---
 
-## Documentation Index
+## Documentation
 
-- 📖 **[How-To-Use Guide & Operational Runbook](docs/HOW_TO_USE.md)**: Operational guide containing execution instructions for running pipelines (UI & GitHub CLI), LocalStack developer sandbox testing, secret rotation, and smoke testing.
-- 📐 **[Architecture & Deployment Runbook](docs/DEPLOYMENT_GUIDE.md)**: In-depth technical architecture, module parameter matrix, and LocalStack simulation validation logs.
+- **[How-To-Use Guide](docs/HOW_TO_USE.md)**: Instructions and commands for triggering pipelines, running LocalStack locally, updating secrets, and running health checks.
+- **[Deployment & Architecture Guide](docs/DEPLOYMENT_GUIDE.md)**: Detailed technical specifications, module parameters, and LocalStack verification details.

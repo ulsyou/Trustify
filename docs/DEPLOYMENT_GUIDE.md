@@ -1,12 +1,12 @@
-# DevOps Technical Assessment: AWS Infrastructure & Deployment Runbook
+# Deployment & Architecture Guide
 
-This runbook provides end-to-end instructions for **evaluating**, **provisioning**, **testing**, **automating**, and **tearing down** the technical assessment exercise for **Trustify** on AWS (simulated locally using **LocalStack Pro** with `tflocal` and `awslocal`).
+Technical reference for the AWS infrastructure architecture, Terraform modules, and CI/CD pipelines.
 
 ---
 
-## 1. Overview & Simulation Architecture
+## 1. Network Architecture
 
-The infrastructure deploys a containerized FastAPI application with a dedicated PostgreSQL database following enterprise 3-tier cloud architecture principles.
+The infrastructure implements a 3-tier VPC across 2 Availability Zones (`ap-southeast-2a`, `ap-southeast-2b`):
 
 ```
                       INTERNET
@@ -17,7 +17,7 @@ The infrastructure deploys a containerized FastAPI application with a dedicated 
         ┌────────────────┴────────────────┐
         │       Public Subnets (x2)       │
         │   ┌─────────────────────────┐   │
-        │   │ Application Load Balancer│  │ (HTTP :80)
+        │   │ Application Load Balancer│  │ (Port 80 HTTP Ingress)
         │   └────────────┬────────────┘   │
         │                │                │
         │   [ NAT Gateway & Elastic IP ]  │
@@ -26,507 +26,110 @@ The infrastructure deploys a containerized FastAPI application with a dedicated 
         ┌────────────────┼────────────────┐
         │     Private App Subnets (x2)    │
         │   ┌────────────▼────────────┐   │
-        │   │  ECS Fargate Container  │   │ (:8000 FastAPI)
+        │   │  ECS Fargate Container  │   │ (Port 8000 FastAPI)
         │   └────────────┬────────────┘   │
         └────────────────┼────────────────┘
-                         │ (TCP :5432)
+                         │ (Port 5432)
         ┌────────────────┼────────────────┐
         │      Private DB Subnets (x2)    │
         │   ┌────────────▼────────────┐   │
-        │   │  RDS PostgreSQL 16.1    │   │ (Isolated)
+        │   │  RDS PostgreSQL 16.1    │   │ (Isolated Database Tier)
         │   └─────────────────────────┘   │
         └─────────────────────────────────┘
 ```
 
-### 1.1 Key Architectural Parameters
-- **Target Region:** `ap-southeast-2` (Sydney).
-- **Workload High-Availability Tier:** 
-  - **`dev` & `staging` are strictly Single-AZ:** `db_multi_az = false` (no standby RDS replica) and `nat_gateway_count = 1` (single NAT gateway) to minimize operational cost.
-  - **`prod` is Multi-AZ:** `db_multi_az = true` and `nat_gateway_count = 2` (high-availability redundancy).
-  - *(Note: Subnets exist across 2 AZs (`2a`, `2b`) solely because AWS hard-requires at least 2 AZs to instantiate an ALB and an RDS Subnet Group; subnets themselves incur no AWS charges).*
-- **Naming Standard:** `${var.prefix}-${var.project}-${var.environment}-<resource>` (`tru-demo-dev-...`).
+### Subnet Allocation
+
+Each environment uses a `/16` VPC partitioned into `/20` subnets:
+
+| Subnet Type | Dev (`10.10.0.0/16`) | Staging (`10.20.0.0/16`) | Prod (`10.30.0.0/16`) | Target Routing |
+| :--- | :--- | :--- | :--- | :--- |
+| **Public AZ-a** | `10.10.0.0/20` | `10.20.0.0/20` | `10.30.0.0/20` | Internet Gateway (IGW) |
+| **Public AZ-b** | `10.10.16.0/20` | `10.20.16.0/20` | `10.30.16.0/20` | Internet Gateway (IGW) |
+| **App AZ-a** | `10.10.32.0/20` | `10.20.32.0/20` | `10.30.32.0/20` | NAT Gateway 1 |
+| **App AZ-b** | `10.10.48.0/20` | `10.20.48.0/20` | `10.30.48.0/20` | NAT Gateway 1 (or 2 in Prod) |
+| **DB AZ-a** | `10.10.64.0/20` | `10.20.64.0/20` | `10.30.64.0/20` | Isolated (Local VPC only) |
+| **DB AZ-b** | `10.10.80.0/20` | `10.20.80.0/20` | `10.30.80.0/20` | Isolated (Local VPC only) |
 
 ---
 
-## 2. LocalStack Installation & Environment Setup
+## 2. Environment Matrix
 
-Follow these steps to set up your local AWS simulation environment from scratch.
-
-### 2.1 System Prerequisites
-Ensure the following tools are installed on your machine:
-- **Docker Desktop** (running and healthy): [Download Docker](https://www.docker.com/products/docker-desktop/)
-- **Python 3.10+** (with `pip`): [Download Python](https://www.python.org/downloads/)
-- **Terraform CLI** (v1.5+): [Download Terraform](https://developer.hashicorp.com/terraform/install)
-- **AWS CLI v2**: [Download AWS CLI](https://aws.amazon.com/cli/)
-
----
-
-### 2.2 Install LocalStack CLI (`lstk`)
-Install the official LocalStack CLI using your preferred package manager:
-
-#### Windows (Winget or Scoop):
-```powershell
-# Using Winget
-winget install LocalStack.LocalStack
-
-# Or using Scoop
-scoop bucket add localstack https://github.com/localstack/scoop-bucket.git
-scoop install localstack
-```
-
-#### Via Python Pip (Alternative):
-```powershell
-pip install localstack
-```
+| Parameter | Dev | Staging | Prod |
+| :--- | :--- | :--- | :--- |
+| **VPC CIDR** | `10.10.0.0/16` | `10.20.0.0/16` | `10.30.0.0/16` |
+| **High Availability** | Single-AZ | Single-AZ | Multi-AZ |
+| **NAT Gateways** | 1 | 1 | 2 (1 per AZ) |
+| **RDS Instance Class** | `db.t4g.micro` | `db.t4g.micro` | `db.t4g.small` |
+| **RDS Multi-AZ** | `false` | `false` | `true` |
+| **ECS Task CPU / RAM** | 256 / 512 | 256 / 512 | 512 / 1024 |
+| **ECS Desired Count** | 1 | 1 | 2 |
+| **Promotion Trigger** | Push to `main` | Auto after Dev test | Manual Approval |
 
 ---
 
-### 2.3 Install Automation Wrappers (`tflocal` & `awslocal`)
-Install the Python CLI wrappers that automatically route Terraform and AWS CLI calls to the local emulator without requiring manual endpoint overrides:
+## 3. Security Groups & Traffic Rules
 
-```powershell
-pip install awscli-local terraform-local
-```
+Traffic flows strictly from outer to inner tiers:
 
-#### Add Python Scripts to Your PATH:
-If running on Windows and `tflocal` or `awslocal` is not recognized, add the Python Scripts directory to your PowerShell session:
-```powershell
-# Current session:
-$env:PATH += ";$env:APPDATA\Python\Python314\Scripts"
+1. **ALB Security Group (`alb-sg`)**:
+   - Ingress: Port 80 from `0.0.0.0/0`.
+   - Egress: Port 8000 to `app-sg`.
 
-# Permanently for User (PowerShell):
-[Environment]::SetEnvironmentVariable(
-    "Path",
-    [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:APPDATA\Python\Python314\Scripts",
-    "User"
-)
-```
+2. **ECS Security Group (`app-sg`)**:
+   - Ingress: Port 8000 only from `alb-sg`.
+   - Egress: Port 5432 to `db-sg`, HTTPS (443) to internet/VPC endpoints for ECR and Secrets Manager.
+
+3. **RDS Security Group (`db-sg`)**:
+   - Ingress: Port 5432 only from `app-sg`.
+   - Egress: None (fully private database tier).
 
 ---
 
-### 2.4 Start & Authenticate LocalStack
+## 4. Components & Terraform Modules
 
-1. **Start the emulator:**
-   ```powershell
-   lstk start
-   ```
-
-2. **Select Emulator Type:**
-   When prompted, choose `AWS`:
-   ```
-   Which emulator would you like to use? AWS
-   ✔︎ AWS emulator selected.
-   ✔︎ Pulled localstack/localstack-pro:latest
-   ✔︎ LocalStack is running (containerId: a2272fc4baee)
-   • Endpoint: localhost.localstack.cloud:4566
-   ```
-
-3. **Verify STS caller identity:**
-   ```powershell
-   awslocal sts get-caller-identity
-   ```
-   *Expected Output:*
-   ```json
-   {
-       "UserId": "AKIAIOSFODNN7EXAMPLE",
-       "Account": "000000000000",
-       "Arn": "arn:aws:iam::000000000000:root"
-   }
-   ```
-
-4. **Verify Health Endpoint:**
-   ```powershell
-   curl http://localhost:4566/_localstack/health
-   ```
+- **`network`**: Manages VPC, subnets, route tables, internet gateway, and NAT gateways.
+- **`security_groups`**: Creates least-privilege security groups for ALB, ECS, and RDS.
+- **`alb`**: Public load balancer, target group (`/health` probe), and HTTP listener.
+- **`ecs`**: Fargate cluster, task definition, IAM execution/task roles, CloudWatch log group, and service configuration. Uses `lifecycle { ignore_changes = [desired_count] }` to allow autoscaling.
+- **`ecr`**: Container repository with lifecycle policy (retains last 30 tagged images).
+- **`rds`**: PostgreSQL 16.1 engine, subnet group across 2 AZs, and automated credentials generated in Secrets Manager.
+- **`monitoring`**: CloudWatch metric alarms for ALB 5xx errors and high ECS memory, hooked to an SNS alert topic.
 
 ---
 
-## 3. Step-by-Step Deployment Instructions
+## 5. Secrets Management Architecture
 
-In an enterprise GitOps workflow, **infrastructure is never provisioned manually from developer workstations for shared environments**. All production-grade deployments are driven by automated **GitHub Actions CI/CD Pipelines** with auditable plan reviews, OIDC authentication, and automated smoke testing.
-
-Local command-line operations (`tflocal`) are reserved strictly for rapid developer sandbox prototyping.
-
----
-
-### 3.1 Infrastructure Provisioning Pipeline (IaC)
-
-#### Method A: Continuous Delivery on Merge (Standard Flow)
-Every commit merged into the `main` branch automatically triggers the IaC deployment pipeline ([`iac-provision-pipeline.yml`](../.github/workflows/iac-provision-pipeline.yml)):
-1. **Pull Request Validation ([`ci.yml`](../.github/workflows/ci.yml)):**
-   - Automatically runs `terraform fmt -check`, `terraform validate`, and **Checkov** security scans.
-   - Generates an immutable plan and posts the plan diff as a sticky comment directly on the PR for peer review.
-2. **Dev Deployment:** Automatically deploys the full stack to `dev`.
-3. **Automated Smoke Testing:** Runs an automated curl health check against `http://<alb-endpoint>/health` to verify container reachability and database connectivity.
-4. **Staging Promotion:** Automatically deploys to `staging` upon successful dev verification.
-5. **Production Approval Gate:** Pauses execution and requires manual review and sign-off from designated DevOps Leads before applying to `prod`.
+To avoid storing credentials or application configs in GitHub Actions:
+- **`tru-demo-<env>-db-credentials`**: Contains database host, port, username, password, and connection string.
+- **`tru-demo-<env>-app-secrets`**: Contains application environment variables (`APP_ENV`, `LOG_LEVEL`, API keys).
+- **Injection Mechanism**: The ECS Task Execution Role has IAM permissions (`secretsmanager:GetSecretValue`) to inject these values as environment variables directly at container launch.
+- **Configuration Updates**: Changes made in AWS Secrets Manager are picked up on the next rolling update (`aws ecs update-service --force-new-deployment`).
 
 ---
 
-#### Method B: Manual Workflow Dispatch (GitHub Actions UI / CLI)
-For out-of-band updates, emergency hotfixes, or targeted changes, use GitHub's manual workflow dispatch:
-
-##### 1. Via GitHub Web UI:
-1. Navigate to **Actions** &rarr; **IaC Deployment Pipeline**.
-2. Click **Run workflow**.
-3. Select your target branch (e.g., `main`).
-4. Choose the **Target environment** (`dev`, `staging`, or `prod`).
-5. *(Optional)* Specify a **Target resource or module** (e.g. `module.ecs` or `module.rds`). Leave blank to deploy the full environment.
-6. Click **Run workflow**.
-
-##### 2. Via GitHub CLI (`gh`):
-```bash
-# Deploy full Dev environment
-gh workflow run iac-provision-pipeline.yml -f environment=dev
-
-# Deploy full Staging environment
-gh workflow run iac-provision-pipeline.yml -f environment=staging
-
-# Surgical Hotfix: Deploy only the ECS service in Dev without touching network or database
-gh workflow run iac-provision-pipeline.yml -f environment=dev -f target="module.ecs"
-
-# Multi-target Hotfix: Deploy ECS and ALB
-gh workflow run iac-provision-pipeline.yml -f environment=dev -f target="module.ecs module.alb"
-```
-
----
-
-### 3.2 Application Delivery Pipeline (FastAPI on ECS Fargate)
-
-The application workload ([`app/compose-demo`](../app/compose-demo)) is built and deployed to AWS ECS Fargate via [`application-deployment-pipeline.yml`](../.github/workflows/application-deployment-pipeline.yml) following the **Build Once, Deploy Everywhere** principle.
-
-#### 1. Pipeline Stages & Progressive Delivery Flow
-```
-Commit to Main          Stage 1: Quality Gate        Stage 2: Build & Push       Stage 3: Progressive Delivery
-┌─────────────┐        ┌─────────────────────┐      ┌──────────────────────┐    ┌───────────────────────────────┐
-│ Git Push /  │ ─────► │ • flake8 Linting    │ ───► │ • Build Once         │ ──►│ 1. Deploy Dev & Smoke Test    │
-│ Merge       │        │ • FastAPI Import    │      │ • Push to ECR        │    │ 2. Deploy Staging & Smoke Test│
-└─────────────┘        └─────────────────────┘      │ • Resolve Tags       │    │ 3. [Production Approval Gate] │
-                                                    └──────────────────────┘    │ 4. Deploy Prod (Version Check)│
-                                                                                └───────────────────────────────┘
-```
-
-#### 2. Versioning & Tagging Policy
-To guarantee enterprise safety and traceability:
-- **Dev & Staging:** Automatically tagged using the Git commit SHA (`${{ github.sha }}`) and `:latest`. No manual version tagging is required for rapid iterative development.
-- **Production:** **Strictly requires an explicit release version** (e.g., `v1.0.0`, semver git tag `refs/tags/v*`, or [`app/compose-demo/VERSION`](../app/compose-demo/VERSION)). Deployments using an unversioned commit SHA are blocked by an automated policy validation step before touching Production.
-
-#### 3. Simplified Native AWS CLI Commands
-Instead of verbose multi-step JSON manipulation scripts, the pipeline uses native AWS CLI commands:
-```bash
-# Deploy to ECS Fargate (Rolling update of latest image)
-aws ecs update-service --cluster tru-demo-$ENV-cluster --service tru-demo-$ENV-service --force-new-deployment
-
-# Automated Smoke Test
-ALB_DNS=$(aws elbv2 describe-load-balancers --names tru-demo-$ENV-alb --query "LoadBalancers[0].DNSName" --output text 2>/dev/null || echo "")
-[ -n "$ALB_DNS" ] && curl --fail --retry 3 --retry-delay 5 "http://$ALB_DNS/health" || true
-```
-
-#### 4. Manual Application Dispatch via GitHub CLI (`gh`):
-```bash
-# Deploy app to Dev environment (automatically uses Git commit tag)
-gh workflow run application-deployment-pipeline.yml -f environment=dev
-
-# Deploy app to Staging environment (automatically uses Git commit tag)
-gh workflow run application-deployment-pipeline.yml -f environment=staging
-
-# Deploy app to Production (strictly requires explicit release version)
-gh workflow run application-deployment-pipeline.yml -f environment=prod -f version=v1.0.0
-```
-
----
-
-### 3.3 Secondary Method: Local Developer Sandbox (`tflocal` Prototyping)
-
-Use this method **only** when developing new modules offline or prototyping locally in LocalStack prior to pushing Git commits.
-
-#### Step 1: Bootstrap Local Remote State Backend (`shared/backend`)
-```powershell
-# From project root:
-cd iac/shared/backend
-
-# Initialize backend stack
-tflocal init
-
-# Generate & review plan
-tflocal plan -out=backend.tfplan
-
-# Apply the reviewed plan
-tflocal apply backend.tfplan
-```
-
-#### Step 2: Deploy Dev Environment Stack (`environments/dev`)
-```powershell
-# From project root:
-cd iac/environments/dev
-
-# Initialize modules
-tflocal init
-
-# Generate immutable execution plan
-tflocal plan -out=dev.tfplan
-
-# Apply reviewed plan
-tflocal apply dev.tfplan
-```
-
-*(Optional) Layered local apply during module development:*
-```powershell
-# Apply network foundation first
-tflocal apply -target=module.network
-
-# Incrementally apply dependent layers
-tflocal apply -target=module.security_groups
-tflocal apply -target=module.alb
-tflocal apply -target=module.rds
-tflocal apply -target=module.ecr
-tflocal apply -target=module.ecs
-tflocal apply -target=module.monitoring
-```
-
----
-
-## 4. Live Simulation Results (Dev Environment Snapshot)
-
-All resources below were verified deployed in LocalStack (`ap-southeast-2`):
-
-### 4.1 Remote State & Lock
-| Resource | Physical ID / Name | Notes |
-| :--- | :--- | :--- |
-| **S3 State Bucket** | `tru-demo-tfstate-apse2` | Versioning enabled, AES-256 encrypted |
-| **DynamoDB Lock Table** | `tru-demo-tfstate-lock` | Primary key: `LockID` |
-
----
-
-### 4.2 Network Layer (`aws_network`)
-| Resource | Physical ID / Name | CIDR / Target |
-| :--- | :--- | :--- |
-| **VPC** | `vpc-27763900ad42f3aa7` (`tru-demo-dev-vpc`) | `10.10.0.0/16` |
-| **Public Subnet 2a** | `subnet-a7effbcc550ddef31` (`tru-demo-dev-public-ap-southeast-2a`) | `10.10.0.0/20` |
-| **Public Subnet 2b** | `subnet-d79b63817058b5595` (`tru-demo-dev-public-ap-southeast-2b`) | `10.10.16.0/20` |
-| **Private App Subnet 2a** | `subnet-c38bcee9339d90bfa` (`tru-demo-dev-app-ap-southeast-2a`) | `10.10.32.0/20` |
-| **Private App Subnet 2b** | `subnet-ed047f655e013b3e8` (`tru-demo-dev-app-ap-southeast-2b`) | `10.10.48.0/20` |
-| **Private DB Subnet 2a** | `subnet-5e97a20ba4d45a502` (`tru-demo-dev-db-ap-southeast-2a`) | `10.10.64.0/20` |
-| **Private DB Subnet 2b** | `subnet-98b41fd808f13497b` (`tru-demo-dev-db-ap-southeast-2b`) | `10.10.80.0/20` |
-| **RDS Subnet Group** | `tru-demo-dev-db-subnet-group` | 2 DB Subnets |
-| **Internet Gateway** | `igw-e51e6d26cc26f38ac` (`tru-demo-dev-igw`) | Attached to VPC |
-| **NAT Gateway** | `nat-32260c237ca21352f` (`tru-demo-dev-nat-1`) | In Public Subnet 2a |
-| **Elastic IP** | `eipalloc-13eff0e053b4665d8` (`tru-demo-dev-nat-eip-1`) | Attached to NAT |
-
----
-
-### 4.3 Security Groups (`aws_security_groups`)
-| Security Group | Physical ID / Name | Allowed Traffic (Least Privilege) |
-| :--- | :--- | :--- |
-| **ALB SG** | `sg-bf1f034921648c059` (`tru-demo-dev-alb-sg`) | Ingress: Port `80` from `0.0.0.0/0` |
-| **App SG** | `sg-aefc5a8aa1e903a4f` (`tru-demo-dev-app-sg`) | Ingress: Port `8000` strictly from `sg-bf1f034921648c059` |
-| **DB SG** | `sg-897427d6e7e811d39` (`tru-demo-dev-db-sg`) | Ingress: Port `5432` strictly from `sg-aefc5a8aa1e903a4f` |
-
----
-
-### 4.4 Load Balancer (`aws_alb`)
-| Resource | Physical ID / Name | Configuration |
-| :--- | :--- | :--- |
-| **ALB** | `arn:aws:elasticloadbalancing:ap-southeast-2:000000000000:loadbalancer/app/tru-demo-dev-alb/c813e24c381e44f1` | Public Application Load Balancer |
-| **ALB DNS Name** | `tru-demo-dev-alb.elb.localhost.localstack.cloud` | Active HTTP endpoint |
-| **Target Group** | `arn:aws:elasticloadbalancing:ap-southeast-2:000000000000:targetgroup/tru-demo-dev-tg/8ec3dbd704bf432b` | Port `8000`, Target: `ip`, Healthcheck: `/health` |
-
----
-
-### 4.5 Container Registry & Compute (`aws_ecr`, `aws_ecs`)
-| Resource | Physical ID / Name | Details |
-| :--- | :--- | :--- |
-| **ECR Repository** | `000000000000.dkr.ecr.ap-southeast-2.localhost.localstack.cloud:4566/tru-demo-dev-ecr` | Image scanning & lifecycle purge policy |
-| **ECS Cluster** | `arn:aws:ecs:ap-southeast-2:000000000000:cluster/tru-demo-dev-cluster` | Fargate compute |
-| **ECS Service** | `arn:aws:ecs:ap-southeast-2:000000000000:service/tru-demo-dev-cluster/tru-demo-dev-service` | Launch type: `FARGATE`, Desired count: 1 |
-| **Task Definition** | `arn:aws:ecs:ap-southeast-2:000000000000:task-definition/tru-demo-dev-app:1` | 256 CPU, 512MB RAM, awsvpc mode |
-| **Execution Role** | `arn:aws:iam::000000000000:role/tru-demo-dev-ecs-exec-role` | Image pull + CloudWatch + Secrets Manager |
-| **Task Role** | `arn:aws:iam::000000000000:role/tru-demo-dev-ecs-task-role` | Application runtime role |
-| **Log Group** | `/ecs/tru-demo-dev-app` | CloudWatch Logs (7-day retention) |
-
----
-
-### 4.6 Database & Secrets Management (`aws_rds` & AWS Secrets Manager)
-| Resource | Physical ID / Name | Connection / Details |
-| :--- | :--- | :--- |
-| **RDS Instance** | `tru-demo-dev-pg` (`db-0B8D9B15`) | PostgreSQL 16.1 (`available`) |
-| **RDS Endpoint** | `localhost.localstack.cloud:4510` | Isolated inside private subnets |
-| **DB Secrets (ASM)** | `tru-demo-dev-db-credentials` | Managed by RDS module; keys: `host`, `port`, `username`, `password`, `dbname`, `database_url` |
-| **App Secrets & Env (ASM)** | `tru-demo-dev-app-secrets` | Application configuration & secrets; keys: `APP_ENV`, `LOG_LEVEL`, custom API keys |
-
----
-
-### 4.7 Monitoring & Alerting (`aws_monitoring`)
-| Resource | Physical Name / ARN | Metric / Trigger |
-| :--- | :--- | :--- |
-| **SNS Topic** | `arn:aws:sns:ap-southeast-2:000000000000:tru-demo-dev-alerts` | Alert delivery topic |
-| **Subscription** | `devops@example.com` | Email notifications |
-| **ALB 5xx Alarm** | `tru-demo-dev-alb-target-5xx` | Threshold: > 5 target 5xx errors / min |
-| **ECS Memory Alarm**| `tru-demo-dev-ecs-memory-high` | Threshold: > 85% memory utilization |
-
----
-
-## 5. Verification Commands (`awslocal`)
-
-Run these commands in PowerShell to inspect live resources:
-
-### 5.1 Inspect VPC & Subnets
-```powershell
-# List VPC
-awslocal ec2 describe-vpcs --region ap-southeast-2 --filters "Name=tag:Name,Values=tru-demo-dev-vpc" --output table
-
-# List Subnets
-awslocal ec2 describe-subnets --region ap-southeast-2 --filters "Name=vpc-id,Values=vpc-27763900ad42f3aa7" --query "Subnets[*].{Name:Tags[?Key=='Name'].Value | [0],SubnetId:SubnetId,CidrBlock:CidrBlock,AZ:AvailabilityZone}" --output table
-```
-
-### 5.2 Inspect Gateways & Load Balancer
-```powershell
-# NAT Gateway
-awslocal ec2 describe-nat-gateways --region ap-southeast-2 --filter "Name=vpc-id,Values=vpc-27763900ad42f3aa7" --output table
-
-# ALB
-awslocal elbv2 describe-load-balancers --region ap-southeast-2 --query "LoadBalancers[*].{Name:LoadBalancerName,DNS:DNSName,State:State.Code}" --output table
-```
-
-### 5.3 Inspect Database & Secrets
-```powershell
-# RDS Database
-awslocal rds describe-db-instances --region ap-southeast-2 --query "DBInstances[*].{Identifier:DBInstanceIdentifier,Engine:Engine,Status:DBInstanceStatus,Endpoint:Endpoint.Address,Port:Endpoint.Port}" --output table
-
-# List all secrets in Secrets Manager (Database and App Secrets)
-awslocal secretsmanager list-secrets --region ap-southeast-2 --query "SecretList[*].{Name:Name,ARN:ARN}" --output table
-
-# Inspect Database Credentials
-awslocal secretsmanager get-secret-value --secret-id tru-demo-dev-db-credentials --region ap-southeast-2 --query "SecretString" --output text
-
-# Inspect Application Configuration & Secrets
-awslocal secretsmanager get-secret-value --secret-id tru-demo-dev-app-secrets --region ap-southeast-2 --query "SecretString" --output text
-```
-
-### 5.4 Inspect ECS & CloudWatch Alarms
-```powershell
-# ECS Cluster & Services
-awslocal ecs list-clusters --region ap-southeast-2
-awslocal ecs list-services --cluster tru-demo-dev-cluster --region ap-southeast-2
-
-# CloudWatch Alarms
-awslocal cloudwatch describe-alarms --region ap-southeast-2 --query "MetricAlarms[*].{Name:AlarmName,Metric:MetricName,Threshold:Threshold}" --output table
-```
-
----
-
-## 6. Cleanup & Teardown Instructions
-
----
-
-### 6.1 Primary Teardown Method: Automated Teardown Pipeline (`iac-destroy-pipeline.yml`)
-
-In enterprise environments, infrastructure teardown is guarded by manual confirmation gates to prevent accidental outages.
-
-#### 1. Via GitHub Web UI:
-1. Navigate to **Actions** &rarr; **IaC Teardown Pipeline**.
-2. Click **Run workflow**.
-3. Select the **Target environment** (`dev`, `staging`, or `prod`).
-4. *(Optional)* Specify a **Target resource or module** (e.g. `module.ecs`). Leave blank to destroy the full environment.
-5. In the confirmation prompt, type **`DESTROY`** (case-sensitive safety check).
-6. Click **Run workflow**.
-
-#### 2. Via GitHub CLI (`gh`):
-```bash
-# Full environment destruction (Dev)
-gh workflow run iac-destroy-pipeline.yml -f environment=dev -f confirm_destroy="DESTROY"
-
-# Targeted subsystem destruction (e.g. ECS only)
-gh workflow run iac-destroy-pipeline.yml -f environment=dev -f target="module.ecs" -f confirm_destroy="DESTROY"
-```
-
----
-
-### 6.2 Secondary Method: Local Sandbox Teardown (`tflocal`)
-
-When cleaning up a local LocalStack experiment:
-
-#### Step 1: Destroy Local Dev Stack
-```powershell
-# From project root:
-cd iac/environments/dev
-
-# Review destruction plan
-tflocal plan -destroy -out=destroy.tfplan
-
-# Apply destruction
-tflocal apply destroy.tfplan
-```
-
-#### Step 2: Destroy Backend State (Optional)
-```powershell
-# From project root:
-cd iac/shared/backend
-
-tflocal destroy
-```
-
-#### Step 3: Stop LocalStack Emulator
-```powershell
-lstk stop
-```
-
----
-
-## 7. Enterprise IaC CI/CD Pipeline Architecture
-
-In an enterprise DevOps workflow, manual command-line applies (`tflocal apply`) are strictly for local sandbox experimentation. All team-shared infrastructure changes flow through automated **GitOps CI/CD Pipelines** in `.github/workflows/`.
-
-### 7.1 Pipeline Lifecycle
-
-```
- Developer PR               GitHub Actions CI                Merge to Main               Production Promotion
-┌─────────────┐            ┌──────────────────┐            ┌───────────────┐           ┌────────────────────┐
-│ Code Change │ ─────────► │  1. Lint & Fmt   │ ─────────► │ Auto-Apply to │ ────────► │  Manual Approval   │
-│ & Modules   │            │  2. Sec Scan     │            │      Dev      │           │    Gate for Prod   │
-└─────────────┘            │  3. Plan on PR   │            └───────┬───────┘           └─────────┬──────────┘
-                           └──────────────────┘                    │                             │
-                                                                   ▼                             ▼
-                                                           [ Smoke Tests ]               [ Prod Apply ]
-                                                          (/health, /db-check)
-```
-
-### 7.2 GitHub Actions Workflows
-
-1. **Application Delivery Pipeline ([`.github/workflows/application-deployment-pipeline.yml`](../.github/workflows/application-deployment-pipeline.yml)):**
-   - **Quality Gate:** Automated linting with `flake8`, Dockerfile syntax validation, and module import tests.
-   - **Build Once, Deploy Everywhere:** Single container build from `app/compose-demo/`, tagged for target ECR repositories.
-   - **Versioning Strategy & Enforcement Policy:**
-     - **Dev & Staging:** Automatically tagged using Git commit SHA (`${{ github.sha }}`) and `:latest`.
-     - **Production:** Strictly requires an explicit release version tag (e.g. `v1.0.0`, semver git tag `v*.*.*`, or [`app/compose-demo/VERSION`](../app/compose-demo/VERSION)). The pipeline enforces this policy and blocks unversioned deployments before touching Production.
-   - **Progressive Delivery (AWS Cloud):** On merge to `main`, rolls out to **Dev** ECS Fargate &rarr; verifies health via ALB curl tests &rarr; rolls out to **Staging** &rarr; pauses at **Production** for manual DevOps approval.
-   - **Simplified Native CLI Execution:** `aws ecs update-service --cluster <cluster> --service <service> --force-new-deployment` with zero intermediate JSON parsing.
-   - **Manual Single-Environment Dispatch:** Allows targeting a specific environment (`dev`, `staging`, `prod`) on demand via GitHub Actions UI or `gh` CLI.
-
-2. **Pull Request Quality Pipeline ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)):**
-   - **Static Analysis:** Runs `terraform fmt -check`, `terraform validate`, and `tflint`.
-   - **Security Scanning:** Runs `checkov` to detect misconfigurations and security flaws before merge.
-   - **Plan Generation:** Executes `terraform plan` for the changed environment and posts the exact execution diff as a sticky markdown comment on the PR for team review.
-
-3. **Infrastructure Delivery Pipeline ([`.github/workflows/iac-provision-pipeline.yml`](../.github/workflows/iac-provision-pipeline.yml)):**
-   - **Automated Progressive Delivery:** On merge to `main`, automatically plans and deploys `dev`, runs automated health smoke tests, then progresses to `staging`, and holds before `prod` for manual approval.
-   - **Manual Targeted Dispatch:** Allows team members to dispatch manual runs on specific environments.
-
-4. **Infrastructure Teardown Pipeline ([`.github/workflows/iac-destroy-pipeline.yml`](../.github/workflows/iac-destroy-pipeline.yml)):**
-   - **Protection Mechanism:** Enforces strict manual dispatch and requires typing `"DESTROY"` in `confirm_destroy` before running.
-   - **Targeted Destruction:** Allows destroying an individual subsystem or the complete environment.
-
-5. **Dynamic Targeting Design (Zero Pipeline Maintenance):**
-   - Both `iac-provision-pipeline.yml` and `iac-destroy-pipeline.yml` avoid hardcoding module names in `type: choice` dropdowns.
-   - Instead, they use a flexible string input (`type: string` with default `""`):
-     - **Full Environment (Default):** Leaving `target` empty automatically plans and applies (or destroys) the whole environment declaratively.
-     - **Break-Glass Hotfixes / Surgical Takedowns:** Engineers can input any valid Terraform resource address (e.g., `module.ecs`, `module.rds`, or multiple space-separated targets like `module.ecs module.alb`) directly into the workflow prompt.
-     - **Result:** You will never need to update the CI/CD workflow YAML when new modules or resources are added to `iac/`!
-
-6. **Zero-Secret Authentication:**
-   - Authenticates to AWS via **GitHub OIDC (OpenID Connect)**. No long-lived AWS Access Keys are stored in GitHub Secrets.
-
-7. **Centralized Secrets & Environment Management (AWS Secrets Manager):**
-   - **No Secrets in GitHub Actions:** CI/CD runners only hold the OIDC IAM role ARN for deployment execution; no business secrets, database passwords, or operational configs reside in GitHub Actions.
-   - **Native ECS Fargate Injection:** Secrets and environment variables are resolved directly inside the AWS VPC by the ECS Task Execution Role (`secretsmanager:GetSecretValue`) at container launch.
-   - **Zero-Downtime Rotation:** Updating an environment variable or rotating a secret in ASM takes effect on the next rolling deployment (`aws ecs update-service --force-new-deployment`) without rebuilding container images or editing CI workflows.
+## 6. CI/CD Workflows
+
+The repository uses GitHub Actions for continuous integration and delivery:
+
+1. **PR Quality Check ([`ci.yml`](../.github/workflows/ci.yml))**:
+   - Runs `terraform fmt -check` and `terraform validate`.
+   - Runs `checkov` security scanning on Terraform code.
+   - Generates speculative plan diff and posts summary to PR comments.
+
+2. **Infrastructure Provisioning ([`iac-provision-pipeline.yml`](../.github/workflows/iac-provision-pipeline.yml))**:
+   - Automatically plans and applies changes to `dev` upon merge to `main`.
+   - Runs curl health check against ALB.
+   - Automatically applies to `staging`.
+   - Pauses for manual approval before applying to `prod`.
+   - Supports targeted execution via the `target` input parameter (e.g., `module.ecs`).
+
+3. **Application Delivery ([`application-deployment-pipeline.yml`](../.github/workflows/application-deployment-pipeline.yml))**:
+   - Lints application code with `flake8`.
+   - Builds container image and pushes to ECR.
+   - Deploys progressively to Dev &rarr; Staging &rarr; Prod.
+   - Enforces tag policies: Dev/Staging use commit SHA; Prod strictly requires a release version tag (e.g., `v1.0.0`).
+
+4. **Infrastructure Teardown ([`iac-destroy-pipeline.yml`](../.github/workflows/iac-destroy-pipeline.yml))**:
+   - Requires manual entry of `confirm_destroy: "DESTROY"`.
+   - Can destroy individual modules or entire environments.
