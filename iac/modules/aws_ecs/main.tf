@@ -157,6 +157,10 @@ resource "aws_ecs_service" "this" {
     aws_iam_role_policy_attachment.execution
   ]
 
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+
   tags = {
     Name = "${var.name_prefix}-service"
   }

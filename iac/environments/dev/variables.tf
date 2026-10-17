@@ -15,14 +15,6 @@ variable "region" {
   type = string
 }
 
-variable "region_code" {
-  type = string
-}
-
-variable "region_name" {
-  type = string
-}
-
 variable "responsible_party" {
   type = string
 }
@@ -64,7 +56,7 @@ variable "container_port" {
 
 variable "image_tag" {
   type = string
-  default = "latest-placeholder"
+  default = "latest"
 }
 
 variable "task_cpu" {
