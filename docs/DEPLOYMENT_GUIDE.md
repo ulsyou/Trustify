@@ -6,37 +6,70 @@ Technical reference for the AWS infrastructure architecture, Terraform modules, 
 
 ## 1. Network Architecture
 
-The infrastructure implements a 3-tier VPC across 2 Availability Zones (`ap-southeast-2a`, `ap-southeast-2b`):
+The infrastructure implements an end-to-end 3-tier VPC across 2 Availability Zones (`ap-southeast-2a`, `ap-southeast-2b`) with external DNS, TLS termination, and regional supporting services:
 
 ```
-                      INTERNET
-                         │
-                         ▼
-             [ Internet Gateway (IGW) ]
-                         │
-        ┌────────────────┴────────────────┐
-        │       Public Subnets (x2)       │
-        │   ┌─────────────────────────┐   │
-        │   │ Application Load Balancer│  │ (Port 80 HTTP Ingress)
-        │   └────────────┬────────────┘   │
-        │                │                │
-        │   [ NAT Gateway & Elastic IP ]  │
-        └────────────────┼────────────────┘
-                         │
-        ┌────────────────┼────────────────┐
-        │     Private App Subnets (x2)    │
-        │   ┌────────────▼────────────┐   │
-        │   │  ECS Fargate Container  │   │ (Port 8000 FastAPI)
-        │   └────────────┬────────────┘   │
-        └────────────────┼────────────────┘
-                         │ (Port 5432)
-        ┌────────────────┼────────────────┐
-        │      Private DB Subnets (x2)    │
-        │   ┌────────────▼────────────┐   │
-        │   │  RDS PostgreSQL 16.1    │   │ (Isolated Database Tier)
-        │   └─────────────────────────┘   │
-        └─────────────────────────────────┘
+                             [ User / Clients ]
+                                      │
+               ┌──────────────────────┴──────────────────────┐
+               │                                             │
+               ▼ (1. DNS Resolution)                         ▼ (2. HTTP/HTTPS Traffic)
+  ┌─────────────────────────┐                   ┌─────────────────────────┐
+  │   AWS Route 53 (DNS)    │                   │   INTERNET (Public Web) │
+  │ (Managed outside TF)    │                   └────────────┬────────────┘
+  └─────────────────────────┘                                │
+                                                             ▼
+                                                ┌─────────────────────────┐
+                                                │ Internet Gateway (IGW)  │
+                                                └────────────┬────────────┘
+                                                             │
+  ┌── AWS Region (ap-southeast-2) ───────────────────────────┼────────────────────────────────┐
+  │                                                          │                                │
+  │   [ AWS Certificate Manager (ACM) ] ──(SSL/TLS)──►       ▼                                │
+  │                                                ┌───────────────────┐                      │
+  │                                                │    Public ALB     │ (Port 80 / 443)      │
+  │                                                └─────────┬─────────┘                      │
+  │                                                          │                                │
+  │  ┌── VPC ────────────────────────────────────────────────┼────────────────────────────┐   │
+  │  │                                                       │                            │   │
+  │  │                     ┌─────────────────────────────────┴─────────────────┐          │   │
+  │  │                     ▼                                                   ▼          │   │
+  │  │        ┌─────────────────────────┐                         ┌─────────────────────┐ │   │
+  │  │        │   Availability Zone A   │                         │ Availability Zone B │ │   │
+  │  │        │                         │                         │                     │ │   │
+  │  │        │ ┌─────────────────────┐ │                         │ ┌─────────────────┐ │ │   │
+  │  │        │ │ Public Subnet       │ │                         │ │ Public Subnet   │ │ │   │
+  │  │        │ │   [ NAT Gateway A ] │◄──(Egress)──┐ ┌──(Egress)─┼─► [ NAT Gateway B]│ │ │   │
+  │  │        │ └─────────────────────┘ │           │ │           │ └─────────────────┘ │ │   │
+  │  │        │                         │           │ │           │                     │ │   │
+  │  │        │ ┌─────────────────────┐ │           │ │           │ ┌─────────────────┐ │ │   │
+  │  │        │ │ Private App Subnet  │ │           │ │           │ │ Private App Sub │ │ │   │
+  │  │        │ │   [ ECS Task A ]    │─┴───────────┘ └───────────┴─│   [ ECS Task B] │ │ │   │
+  │  │        │ └──────────┬──────────┘                             └──────────┬──────┘ │ │   │
+  │  │        │            │ (Port 5432)                                       │        │ │   │
+  │  │        │            └───────────────────┐       ┌───────────────────────┘        │ │   │
+  │  │        │                                ▼       ▼                                │ │   │
+  │  │        │ ┌─────────────────────┐     ┌─────────────────────┐                     │ │   │
+  │  │        │ │ Private DB Subnet   │     │ Private DB Subnet   │                     │ │   │
+  │  │        │ │  [ RDS Primary ]    │◄───►│  [ RDS Standby ]    │                     │ │   │
+  │  │        │ │  (PostgreSQL 16.1)  │Sync │  (Prod Multi-AZ)    │                     │ │   │
+  │  │        │ └─────────────────────┘Repl └─────────────────────┘                     │ │   │
+  │  │        └─────────────────────────────────────────────────────────────────────────┘ │   │
+  │  └────────────────────────────────────────────────────────────────────────────────────┘   │
+  │                                                                                           │
+  │  ┌── Supporting Regional Services ────────────────────────────────────────────────────┐   │
+  │  │  • Amazon ECR: Stores immutable container images pushed by GitHub Actions CI/CD    │   │
+  │  │  • AWS Secrets Manager: Injects DB credentials & environment variables into ECS    │   │
+  │  │  • Amazon CloudWatch & SNS: Collects metrics/logs and triggers email alert alarms  │   │
+  │  └────────────────────────────────────────────────────────────────────────────────────┘   │
+  └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **Note on DNS, Ingress & Scope:**
+> - **Route 53 & ACM:** Route 53 routes public traffic to the ALB via an Alias/CNAME record, and ACM provides the SSL/TLS certificate for HTTPS termination. Route 53 hosted zones and top-level domain registrations are managed outside this Terraform configuration to avoid accidental deletion.
+> - **Ingress Flow:** Public traffic flows from the Internet Gateway directly to the Public ALB, which distributes traffic across private ECS Fargate tasks on port 8000.
+> - **Egress Flow:** Containers in private application subnets reach the internet (e.g., for ECR image pulls and outbound API requests) via NAT Gateways in the public subnets.
+
 
 ### Subnet Allocation
 
@@ -95,6 +128,10 @@ Traffic flows strictly from outer to inner tiers:
 - **`ecr`**: Container repository with lifecycle policy (retains last 30 tagged images).
 - **`rds`**: PostgreSQL 16.1 engine, subnet group across 2 AZs, and automated credentials generated in Secrets Manager.
 - **`monitoring`**: CloudWatch metric alarms for ALB 5xx errors and high ECS memory, hooked to an SNS alert topic.
+
+> **External / Pre-existing Services (Non-Terraform):**
+> - **`Route 53`**: Public DNS hosted zone and domain routing to ALB DNS name (managed externally or at organization root to decouple lifecycle from environment tear-downs).
+> - **`ACM`**: SSL/TLS certificate provisioned with DNS validation for HTTPS listeners.
 
 ---
 

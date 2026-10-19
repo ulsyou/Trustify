@@ -8,39 +8,63 @@ The setup is tested locally using LocalStack.
 
 ## Architecture Overview
 
-The infrastructure uses a standard 3-tier VPC layout:
-- **Public Subnets**: Internet Gateway, NAT Gateway, Application Load Balancer (ALB).
-- **Private App Subnets**: ECS Fargate running the FastAPI container.
-- **Private DB Subnets**: RDS PostgreSQL (isolated from the internet).
+The infrastructure implements an end-to-end 3-tier VPC across 2 Availability Zones (`ap-southeast-2a`, `ap-southeast-2b`) with external DNS, TLS termination, and supporting services:
 
 ```
-                      INTERNET
-                         │
-                         ▼
-             [ Internet Gateway (IGW) ]
-                         │
-        ┌────────────────┴────────────────┐
-        │       Public Subnets (x2)       │
-        │   ┌─────────────────────────┐   │
-        │   │ Application Load Balancer│  │ (Port 80)
-        │   └────────────┬────────────┘   │
-        │                │                │
-        │   [ NAT Gateway & Elastic IP ]  │
-        └────────────────┼────────────────┘
-                         │
-        ┌────────────────┼────────────────┐
-        │     Private App Subnets (x2)    │
-        │   ┌────────────▼────────────┐   │
-        │   │  ECS Fargate Container  │   │ (Port 8000 FastAPI)
-        │   └────────────┬────────────┘   │
-        └────────────────┼────────────────┘
-                         │ (Port 5432)
-        ┌────────────────┼────────────────┐
-        │      Private DB Subnets (x2)    │
-        │   ┌────────────▼────────────┐   │
-        │   │  RDS PostgreSQL 16.1    │   │ (Private)
-        │   └─────────────────────────┘   │
-        └─────────────────────────────────┘
+                             [ User / Clients ]
+                                      │
+               ┌──────────────────────┴──────────────────────┐
+               │                                             │
+               ▼ (1. DNS Resolution)                         ▼ (2. HTTP/HTTPS Traffic)
+  ┌─────────────────────────┐                   ┌─────────────────────────┐
+  │   AWS Route 53 (DNS)    │                   │   INTERNET (Public Web) │
+  │ (Managed outside TF)    │                   └────────────┬────────────┘
+  └─────────────────────────┘                                │
+                                                             ▼
+                                                ┌─────────────────────────┐
+                                                │ Internet Gateway (IGW)  │
+                                                └────────────┬────────────┘
+                                                             │
+  ┌── AWS Region (ap-southeast-2) ───────────────────────────┼────────────────────────────────┐
+  │                                                          │                                │
+  │   [ AWS Certificate Manager (ACM) ] ──(SSL/TLS)──►       ▼                                │
+  │                                                ┌───────────────────┐                      │
+  │                                                │    Public ALB     │ (Port 80 / 443)      │
+  │                                                └─────────┬─────────┘                      │
+  │                                                          │                                │
+  │  ┌── VPC ────────────────────────────────────────────────┼────────────────────────────┐   │
+  │  │                                                       │                            │   │
+  │  │                     ┌─────────────────────────────────┴─────────────────┐          │   │
+  │  │                     ▼                                                   ▼          │   │
+  │  │        ┌─────────────────────────┐                         ┌─────────────────────┐ │   │
+  │  │        │   Availability Zone A   │                         │ Availability Zone B │ │   │
+  │  │        │                         │                         │                     │ │   │
+  │  │        │ ┌─────────────────────┐ │                         │ ┌─────────────────┐ │ │   │
+  │  │        │ │ Public Subnet       │ │                         │ │ Public Subnet   │ │ │   │
+  │  │        │ │   [ NAT Gateway A ] │◄──(Egress)──┐ ┌──(Egress)─┼─► [ NAT Gateway B]│ │ │   │
+  │  │        │ └─────────────────────┘ │           │ │           │ └─────────────────┘ │ │   │
+  │  │        │                         │           │ │           │                     │ │   │
+  │  │        │ ┌─────────────────────┐ │           │ │           │ ┌─────────────────┐ │ │   │
+  │  │        │ │ Private App Subnet  │ │           │ │           │ │ Private App Sub │ │ │   │
+  │  │        │ │   [ ECS Task A ]    │─┴───────────┘ └───────────┴─│   [ ECS Task B] │ │ │   │
+  │  │        │ └──────────┬──────────┘                             └──────────┬──────┘ │ │   │
+  │  │        │            │ (Port 5432)                                       │        │ │   │
+  │  │        │            └───────────────────┐       ┌───────────────────────┘        │ │   │
+  │  │        │                                ▼       ▼                                │ │   │
+  │  │        │ ┌─────────────────────┐     ┌─────────────────────┐                     │ │   │
+  │  │        │ │ Private DB Subnet   │     │ Private DB Subnet   │                     │ │   │
+  │  │        │ │  [ RDS Primary ]    │◄───►│  [ RDS Standby ]    │                     │ │   │
+  │  │        │ │  (PostgreSQL 16.1)  │Sync │  (Prod Multi-AZ)    │                     │ │   │
+  │  │        │ └─────────────────────┘Repl └─────────────────────┘                     │ │   │
+  │  │        └─────────────────────────────────────────────────────────────────────────┘ │   │
+  │  └────────────────────────────────────────────────────────────────────────────────────┘   │
+  │                                                                                           │
+  │  ┌── Supporting Regional Services ────────────────────────────────────────────────────┐   │
+  │  │  • Amazon ECR: Stores immutable container images pushed by GitHub Actions CI/CD    │   │
+  │  │  • AWS Secrets Manager: Injects DB credentials & environment variables into ECS    │   │
+  │  │  • Amazon CloudWatch & SNS: Collects metrics/logs and triggers email alert alarms  │   │
+  │  └────────────────────────────────────────────────────────────────────────────────────┘   │
+  └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Environment Tiers
