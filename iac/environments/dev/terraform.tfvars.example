@@ -1,0 +1,45 @@
+# ==============================================================================
+# Dev Environment Variables Example (terraform.tfvars.example)
+# Copy to terraform.tfvars to customize for local or manual deployment
+# ==============================================================================
+
+# Common Tags & Naming
+prefix            = "tru"
+project           = "demo"
+environment       = "dev"
+region            = "ap-southeast-2"
+responsible_party = "devops-team"
+owner             = "devops"
+
+# Network Tier (VPC 10.10.0.0/16 across 2 AZs, 1 NAT Gateway for cost savings)
+vpc_cidr           = "10.10.0.0/16"
+availability_zones = ["ap-southeast-2a", "ap-southeast-2b"]
+nat_gateway_count  = 1
+
+# Compute Tier (ECS Fargate - 0.25 vCPU, 512 MiB RAM)
+container_port            = 8000
+image_tag                 = "latest"
+task_cpu                  = 256
+task_memory               = 512
+desired_count             = 1
+enable_autoscaling        = false
+autoscaling_min_capacity  = 1
+autoscaling_max_capacity  = 2
+autoscaling_cpu_target    = 70
+log_retention_days        = 7
+enable_container_insights = false
+
+# Database Tier (RDS PostgreSQL 16.1 - Graviton2 Single-AZ)
+db_name                  = "demo_db"
+db_instance_class        = "db.t4g.micro"
+db_allocated_storage     = 20
+db_max_allocated_storage = 100
+db_multi_az              = false
+db_backup_retention_days = 1
+db_deletion_protection   = false
+db_skip_final_snapshot   = true
+
+# Monitoring & Budget
+alarm_email        = "alerts@example.com"
+enable_full_alarms = false
+monthly_budget_usd = 50
