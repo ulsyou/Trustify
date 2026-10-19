@@ -21,7 +21,13 @@ variable "container_port" {
 }
 
 variable "health_check_path" {
-  type = string
+  type    = string
   default = "/health"
+}
+
+variable "certificate_arn" {
+  description = "ARN of ACM SSL/TLS certificate for HTTPS listener (optional)"
+  type        = string
+  default     = ""
 }
 #endregion
