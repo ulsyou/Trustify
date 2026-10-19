@@ -142,16 +142,17 @@ curl -i "http://${ALB_DNS}/"
 curl -i "http://${ALB_DNS}/health"
 
 # Test database connection endpoint
-curl -i "http://${ALB_DNS}/db-health"
+curl -i "http://${ALB_DNS}/db-check"
 ```
 
 Expected output for `/health`:
 ```json
-{
-  "status": "healthy",
-  "environment": "dev",
-  "version": "v1.0.0"
-}
+{"status": "ok"}
+```
+
+Expected output for `/db-check`:
+```json
+{"db_status": "ok", "result": 1}
 ```
 
 ---

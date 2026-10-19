@@ -6,6 +6,10 @@ Technical reference for the AWS infrastructure architecture, Terraform modules, 
 
 ## 1. Network Architecture
 
+<p align="center">
+  <img src="./images/architecture-diagram.png" alt="AWS Production Architecture Diagram" width="850"/>
+</p>
+
 The infrastructure implements an end-to-end 3-tier VPC across 2 Availability Zones (`ap-southeast-2a`, `ap-southeast-2b`) with external DNS, TLS termination, and regional supporting services:
 
 ```

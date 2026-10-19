@@ -8,6 +8,10 @@ The setup is tested locally using LocalStack.
 
 ## Architecture Overview
 
+<p align="center">
+  <img src="docs/images/architecture-diagram.png" alt="AWS Production Architecture Diagram" width="850"/>
+</p>
+
 The infrastructure implements an end-to-end 3-tier VPC across 2 Availability Zones (`ap-southeast-2a`, `ap-southeast-2b`) with external DNS, TLS termination, and supporting services:
 
 ```
@@ -144,5 +148,6 @@ ECS tasks load these secrets directly at container startup via the ECS Task Exec
 
 ## Documentation
 
+- **[Verification & Test Results](docs/VERIFICATION_RESULTS.md)**: Proof of `/health` and `/db-check` responses, local test execution logs, and deliverables fulfillment matrix.
 - **[How-To-Use Guide](docs/HOW_TO_USE.md)**: Instructions and commands for triggering pipelines, running LocalStack locally, updating secrets, and running health checks.
-- **[Deployment & Architecture Guide](docs/DEPLOYMENT_GUIDE.md)**: Detailed technical specifications, module parameters, and LocalStack verification details.
+- **[Deployment & Architecture Guide](docs/DEPLOYMENT_GUIDE.md)**: Detailed technical specifications, module parameters, cost estimation, and architecture rationale.
