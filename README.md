@@ -1,4 +1,4 @@
-# DevOps Assessment: AWS Infrastructure & CI/CD
+# AWS Infrastructure & CI/CD
 
 This repository contains an AWS infrastructure setup using Terraform and automated CI/CD pipelines with GitHub Actions for deploying a containerized FastAPI application with PostgreSQL.
 
