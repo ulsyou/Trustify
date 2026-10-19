@@ -1,0 +1,12 @@
+# ==============================================================================
+# S3 & DynamoDB Remote State Backend Variables Example (terraform.tfvars.example)
+# ==============================================================================
+
+prefix = "tru"
+project = "demo"
+environment = "shr"
+region = "ap-southeast-2"
+region_code = "apse2"
+region_name = "sydney"
+responsible_party = "devops-team"
+owner = "devops"
