@@ -238,7 +238,7 @@ Figures are approximate; validate with the [AWS Pricing Calculator](https://calc
 
 ### Cost Drivers
 
-1. **Prod is ~70% of the total bill**, mainly the 2 NAT Gateways (~$93), the ALB (~$32), and Multi-AZ RDS (~$35).
+1. **Prod is ~70% of the total bill**, mainly the 2 NAT Gateways (\~$93), the ALB (\~$32), and Multi-AZ RDS (\~$35).
 2. **NAT Gateways are the largest line item** in every environment. They bill hourly regardless of traffic.
 3. **RDS Multi-AZ doubles the database cost** in Prod, in exchange for automatic failover.
 4. **The ALB has a fixed hourly floor** that does not scale to zero.
